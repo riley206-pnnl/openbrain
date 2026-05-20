@@ -12,7 +12,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/craig8/openbrain/internal/config"
+	"github.com/windingriverholdings/openbrain/internal/config"
 )
 
 // mockBrain records IngestDocument calls without needing a real DB.

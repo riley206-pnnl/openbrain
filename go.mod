@@ -1,4 +1,4 @@
-module github.com/craig8/openbrain
+module github.com/windingriverholdings/openbrain
 
 go 1.25.0
 

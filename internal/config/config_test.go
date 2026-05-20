@@ -120,6 +120,7 @@ func TestMCPHTTPEnabledDefault(t *testing.T) {
 func TestMCPHTTPEnabledFromEnv(t *testing.T) {
 	t.Setenv("OPENBRAIN_MCP_HTTP_ENABLED", "true")
 	t.Setenv("OPENBRAIN_MCP_AUTH_TOKEN", "abcdefghijklmnopqrstuvwxyz123456")
+	t.Setenv("OPENBRAIN_OAUTH_ISSUER", "https://openbrain.example.com")
 	cfg, err := Load()
 	assert.NoError(t, err)
 	assert.True(t, cfg.MCPHTTPEnabled)
@@ -157,10 +158,29 @@ func TestMCPHTTPEnabled_RejectsShortToken(t *testing.T) {
 func TestMCPHTTPEnabled_Accepts32CharToken(t *testing.T) {
 	t.Setenv("OPENBRAIN_MCP_HTTP_ENABLED", "true")
 	t.Setenv("OPENBRAIN_MCP_AUTH_TOKEN", "abcdefghijklmnopqrstuvwxyz123456")
+	t.Setenv("OPENBRAIN_OAUTH_ISSUER", "https://openbrain.example.com")
 	cfg, err := Load()
 	assert.NoError(t, err)
 	assert.True(t, cfg.MCPHTTPEnabled)
 	assert.Equal(t, "abcdefghijklmnopqrstuvwxyz123456", cfg.MCPAuthToken)
+}
+
+func TestMCPHTTPEnabled_RequiresOAuthIssuer(t *testing.T) {
+	t.Setenv("OPENBRAIN_MCP_HTTP_ENABLED", "true")
+	t.Setenv("OPENBRAIN_MCP_AUTH_TOKEN", "abcdefghijklmnopqrstuvwxyz123456")
+	// No issuer set
+	_, err := Load()
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "OPENBRAIN_OAUTH_ISSUER is required")
+}
+
+func TestMCPHTTPEnabled_RejectsBareIssuer(t *testing.T) {
+	t.Setenv("OPENBRAIN_MCP_HTTP_ENABLED", "true")
+	t.Setenv("OPENBRAIN_MCP_AUTH_TOKEN", "abcdefghijklmnopqrstuvwxyz123456")
+	t.Setenv("OPENBRAIN_OAUTH_ISSUER", "openbrain.example.com")
+	_, err := Load()
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "full URL")
 }
 
 func TestMCPHTTPDisabled_AllowsAnyToken(t *testing.T) {

@@ -9,7 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/craig8/openbrain/internal/config"
+	"github.com/windingriverholdings/openbrain/internal/config"
 )
 
 // Format identifies a supported document type.

@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/craig8/openbrain/internal/pathsec"
+	"github.com/windingriverholdings/openbrain/internal/pathsec"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )

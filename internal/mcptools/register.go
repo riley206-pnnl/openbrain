@@ -6,11 +6,11 @@ package mcptools
 import (
 	"context"
 
-	"github.com/craig8/openbrain/internal/brain"
-	"github.com/craig8/openbrain/internal/config"
-	"github.com/craig8/openbrain/internal/embeddings"
-	"github.com/craig8/openbrain/internal/extract"
-	"github.com/craig8/openbrain/internal/intent"
+	"github.com/windingriverholdings/openbrain/internal/brain"
+	"github.com/windingriverholdings/openbrain/internal/config"
+	"github.com/windingriverholdings/openbrain/internal/embeddings"
+	"github.com/windingriverholdings/openbrain/internal/extract"
+	"github.com/windingriverholdings/openbrain/internal/intent"
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
 )

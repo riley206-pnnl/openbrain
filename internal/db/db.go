@@ -11,7 +11,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/craig8/openbrain/internal/model"
+	"github.com/windingriverholdings/openbrain/internal/model"
 )
 
 // NewPool creates a connection pool from a database URL.

@@ -70,7 +70,7 @@
     "actual_type": "insight"
   },
   {
-    "input": "met Sarah Chen at the conference",
+    "input": "met Alice Smith at the conference",
     "expected_type": "person",
     "actual_type": "person"
   },
@@ -130,7 +130,7 @@
     "actual_type": "meeting"
   },
   {
-    "input": "one on one with Sarah",
+    "input": "one on one with Alice",
     "expected_type": "meeting",
     "actual_type": "meeting"
   },

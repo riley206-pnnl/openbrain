@@ -260,11 +260,11 @@
     "expected_supersede_query": "we now use PostgreSQL"
   },
   {
-    "input": "update: Sarah moved to booth 7",
+    "input": "update: Alice moved to team B",
     "expected_intent": "supersede",
-    "expected_text": "Sarah moved to booth 7",
+    "expected_text": "Alice moved to team B",
     "expected_thought_type": "note",
-    "expected_supersede_query": "Sarah moved to booth 7"
+    "expected_supersede_query": "Alice moved to team B"
   },
   {
     "input": "correction: the rate limit is 2000, not 1000",
@@ -313,9 +313,9 @@
     "expected_thought_type": "note"
   },
   {
-    "input": "what do I know about Sarah",
+    "input": "what do I know about Alice",
     "expected_intent": "search",
-    "expected_text": "Sarah",
+    "expected_text": "Alice",
     "expected_thought_type": "note"
   },
   {
@@ -457,9 +457,9 @@
     "expected_thought_type": "note"
   },
   {
-    "input": "met Sarah Chen, she runs engineering at Acme",
+    "input": "met Alice Smith, she runs engineering at Acme",
     "expected_intent": "capture",
-    "expected_text": "Sarah Chen, she runs engineering at Acme",
+    "expected_text": "Alice Smith, she runs engineering at Acme",
     "expected_thought_type": "note"
   },
   {
@@ -475,9 +475,9 @@
     "expected_thought_type": "note"
   },
   {
-    "input": "who is Sarah Chen?",
+    "input": "who is Alice Smith?",
     "expected_intent": "search",
-    "expected_text": "who is Sarah Chen",
+    "expected_text": "who is Alice Smith",
     "expected_thought_type": "note"
   },
   {
@@ -511,9 +511,9 @@
     "expected_thought_type": "note"
   },
   {
-    "input": "Today we had a productive meeting with the platform team. We discussed the migration from Python to Go. Key decisions: 1) Use pgx for database access, 2) Use mcp-go for the MCP server, 3) Start with Ollama for embeddings. Sarah will handle the CI/CD pipeline. Next meeting is Thursday.",
+    "input": "Today we had a productive meeting with the platform team. We discussed the migration from Python to Go. Key decisions: 1) Use pgx for database access, 2) Use mcp-go for the MCP server, 3) Start with Ollama for embeddings. Alice will handle the CI/CD pipeline. Next meeting is Thursday.",
     "expected_intent": "extract",
-    "expected_text": "Today we had a productive meeting with the platform team. We discussed the migration from Python to Go. Key decisions: 1) Use pgx for database access, 2) Use mcp-go for the MCP server, 3) Start with Ollama for embeddings. Sarah will handle the CI/CD pipeline. Next meeting is Thursday.",
+    "expected_text": "Today we had a productive meeting with the platform team. We discussed the migration from Python to Go. Key decisions: 1) Use pgx for database access, 2) Use mcp-go for the MCP server, 3) Start with Ollama for embeddings. Alice will handle the CI/CD pipeline. Next meeting is Thursday.",
     "expected_thought_type": "note"
   },
   {

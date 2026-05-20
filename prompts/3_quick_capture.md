@@ -59,7 +59,7 @@ Contact: [name], [role at company], [how we connected].
 
 **Examples:**
 ```
-Met Sarah Chen who runs engineering at Acme. She's working on a distributed cache problem.
+Met Alice Smith who runs engineering at Acme. She's working on a distributed cache problem.
 James mentioned that his team is evaluating our API for their internal tooling.
 ```
 

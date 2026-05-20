@@ -8,7 +8,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/craig8/openbrain/internal/embeddings"
+	"github.com/windingriverholdings/openbrain/internal/embeddings"
 )
 
 // CircuitBreakerThreshold is the number of consecutive embedding failures

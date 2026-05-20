@@ -9,13 +9,13 @@ import (
 	"strings"
 	"time"
 
-	"github.com/craig8/openbrain/internal/chunker"
-	"github.com/craig8/openbrain/internal/config"
-	"github.com/craig8/openbrain/internal/db"
-	"github.com/craig8/openbrain/internal/docparse"
-	"github.com/craig8/openbrain/internal/extract"
-	"github.com/craig8/openbrain/internal/model"
-	"github.com/craig8/openbrain/internal/pathsec"
+	"github.com/windingriverholdings/openbrain/internal/chunker"
+	"github.com/windingriverholdings/openbrain/internal/config"
+	"github.com/windingriverholdings/openbrain/internal/db"
+	"github.com/windingriverholdings/openbrain/internal/docparse"
+	"github.com/windingriverholdings/openbrain/internal/extract"
+	"github.com/windingriverholdings/openbrain/internal/model"
+	"github.com/windingriverholdings/openbrain/internal/pathsec"
 )
 
 // IngestDocument detects format, parses the file, and optionally auto-captures

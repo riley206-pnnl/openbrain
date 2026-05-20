@@ -11,7 +11,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/craig8/openbrain/internal/config"
+	"github.com/windingriverholdings/openbrain/internal/config"
 )
 
 // Embedder generates vector embeddings from text.

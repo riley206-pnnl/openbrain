@@ -11,13 +11,13 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/craig8/openbrain/internal/config"
-	"github.com/craig8/openbrain/internal/db"
-	"github.com/craig8/openbrain/internal/embeddings"
-	"github.com/craig8/openbrain/internal/extract"
-	"github.com/craig8/openbrain/internal/intent"
-	"github.com/craig8/openbrain/internal/llm"
-	"github.com/craig8/openbrain/internal/model"
+	"github.com/windingriverholdings/openbrain/internal/config"
+	"github.com/windingriverholdings/openbrain/internal/db"
+	"github.com/windingriverholdings/openbrain/internal/embeddings"
+	"github.com/windingriverholdings/openbrain/internal/extract"
+	"github.com/windingriverholdings/openbrain/internal/intent"
+	"github.com/windingriverholdings/openbrain/internal/llm"
+	"github.com/windingriverholdings/openbrain/internal/model"
 )
 
 // Brain orchestrates intent dispatch using an embedder and database pool.

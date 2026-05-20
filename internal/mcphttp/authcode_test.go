@@ -10,7 +10,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/craig8/openbrain/internal/mcphttp"
+	"github.com/windingriverholdings/openbrain/internal/mcphttp"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )

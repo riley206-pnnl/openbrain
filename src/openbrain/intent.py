@@ -175,12 +175,12 @@ HELP_TEXT = """
 **Capture a thought:**
 > decided to use Redis for session caching
 > realised that deploys on Fridays are always risky
-> met Sarah Chen, she runs engineering at Acme
+> met Alice Smith, she runs engineering at Acme
 > remember: the API rate limit is 1000 req/min
 
 **Update a fact (supersede):**
 > actually, we switched from Redis to Valkey
-> update: Sarah moved to booth 7
+> update: Alice moved to team B
 > correction: the rate limit is 2000, not 1000
 
 **Deep capture (extract multiple thoughts):**
@@ -189,7 +189,7 @@ HELP_TEXT = """
 
 **Search:**
 > search: Redis decisions
-> what do I know about Sarah?
+> what do I know about Alice?
 > find: deployment lessons
 
 **Weekly review:**
