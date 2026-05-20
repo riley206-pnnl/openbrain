@@ -81,6 +81,7 @@ func serveHTTP(ctx context.Context, cfg *config.Config, b *brain.Brain, embedder
 	mux.HandleFunc("/api/capture", apiCapture(b))
 	mux.HandleFunc("/api/stats", apiStats(b))
 	mux.HandleFunc("/api/review", apiReview(b))
+	mux.HandleFunc("/api/ingest", apiIngest(b, cfg))
 
 	upgrader := newUpgrader(cfg.WebAllowedOrigins)
 	mux.HandleFunc("/ws", wsHandler(b, upgrader, cfg.WebWSToken))
