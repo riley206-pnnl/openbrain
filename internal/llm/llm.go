@@ -9,7 +9,7 @@ import (
 	"regexp"
 	"sync"
 
-	"github.com/craig8/openbrain/internal/config"
+	"github.com/windingriverholdings/openbrain/internal/config"
 )
 
 // Provider generates text from a prompt.

@@ -14,11 +14,11 @@ import (
 
 	"github.com/gorilla/websocket"
 
-	"github.com/craig8/openbrain/internal/brain"
-	"github.com/craig8/openbrain/internal/config"
-	"github.com/craig8/openbrain/internal/embeddings"
-	"github.com/craig8/openbrain/internal/intent"
-	"github.com/craig8/openbrain/internal/mcphttp"
+	"github.com/windingriverholdings/openbrain/internal/brain"
+	"github.com/windingriverholdings/openbrain/internal/config"
+	"github.com/windingriverholdings/openbrain/internal/embeddings"
+	"github.com/windingriverholdings/openbrain/internal/intent"
+	"github.com/windingriverholdings/openbrain/internal/mcphttp"
 )
 
 //go:embed static

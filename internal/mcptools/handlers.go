@@ -6,10 +6,10 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/craig8/openbrain/internal/brain"
-	"github.com/craig8/openbrain/internal/config"
-	"github.com/craig8/openbrain/internal/intent"
-	"github.com/craig8/openbrain/internal/pathsec"
+	"github.com/windingriverholdings/openbrain/internal/brain"
+	"github.com/windingriverholdings/openbrain/internal/config"
+	"github.com/windingriverholdings/openbrain/internal/intent"
+	"github.com/windingriverholdings/openbrain/internal/pathsec"
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
 )

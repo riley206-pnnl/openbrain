@@ -9,7 +9,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/craig8/openbrain/internal/embeddings"
+	"github.com/windingriverholdings/openbrain/internal/embeddings"
 )
 
 // mockEmbedder implements embeddings.Embedder for testing.

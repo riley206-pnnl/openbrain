@@ -3,7 +3,7 @@ package embeddings
 import (
 	"testing"
 
-	"github.com/craig8/openbrain/internal/config"
+	"github.com/windingriverholdings/openbrain/internal/config"
 	"github.com/stretchr/testify/assert"
 )
 

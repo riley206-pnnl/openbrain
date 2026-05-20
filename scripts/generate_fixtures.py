@@ -75,7 +75,7 @@ def generate_intent_fixtures():
         # === SUPERSEDE ===
         "actually, we switched from Redis to Valkey",
         "Actually we now use PostgreSQL",
-        "update: Sarah moved to booth 7",
+        "update: Alice moved to team B",
         "correction: the rate limit is 2000, not 1000",
         "changed: deploy schedule is now weekly",
         "no longer using Docker for local dev",
@@ -85,7 +85,7 @@ def generate_intent_fixtures():
         "search: Redis decisions",
         "find: deployment lessons",
         "look up: project deadlines",
-        "what do I know about Sarah",
+        "what do I know about Alice",
         "recall: meeting with Alice",
         "remember: the API rate limit",
         "remind me: what was the password policy",
@@ -111,12 +111,12 @@ def generate_intent_fixtures():
         "learning: pgvector HNSW is faster than IVFFlat",
         "realised that Friday deploys are risky",
         "realized the build takes too long",
-        "met Sarah Chen, she runs engineering at Acme",
+        "met Alice Smith, she runs engineering at Acme",
         "meeting with the platform team about auth",
 
         # === SEARCH (implicit — questions) ===
         "what did I decide about caching?",
-        "who is Sarah Chen?",
+        "who is Alice Smith?",
         "when was the last deploy?",
         "where is the config file?",
         "how does the auth flow work?",
@@ -124,7 +124,7 @@ def generate_intent_fixtures():
         "what are our deployment practices?",
 
         # === EXTRACT (implicit — long text >200 chars) ===
-        "Today we had a productive meeting with the platform team. We discussed the migration from Python to Go. Key decisions: 1) Use pgx for database access, 2) Use mcp-go for the MCP server, 3) Start with Ollama for embeddings. Sarah will handle the CI/CD pipeline. Next meeting is Thursday.",
+        "Today we had a productive meeting with the platform team. We discussed the migration from Python to Go. Key decisions: 1) Use pgx for database access, 2) Use mcp-go for the MCP server, 3) Start with Ollama for embeddings. Alice will handle the CI/CD pipeline. Next meeting is Thursday.",
 
         # === CAPTURE (implicit — short statements) ===
         "the server is running on port 8080",
@@ -175,7 +175,7 @@ def generate_infer_type_fixtures():
         ("insight: parallel tests are faster", "insight"),
         ("key takeaway from the retro", "insight"),
         ("key learning: always test locally first", "insight"),
-        ("met Sarah Chen at the conference", "person"),
+        ("met Alice Smith at the conference", "person"),
         ("talked to Bob about the migration", "person"),
         ("talked with Alice about auth", "person"),
         ("called the vendor about pricing", "person"),
@@ -187,7 +187,7 @@ def generate_infer_type_fixtures():
         ("sync with frontend team", "meeting"),
         ("retrospective went well", "meeting"),
         ("1:1 with my manager", "meeting"),
-        ("one on one with Sarah", "meeting"),
+        ("one on one with Alice", "meeting"),
         ("the server runs on port 8080", "note"),
         ("pizza is great", "note"),
         ("need to update the docs", "note"),
@@ -319,7 +319,7 @@ def generate_llm_routing_fixtures():
         # Correction patterns -> primary
         ("actually, we switched to Valkey", threshold, True),
         ("correction: the rate limit is 2000", threshold, True),
-        ("update: Sarah moved to booth 7", threshold, True),
+        ("update: Alice moved to team B", threshold, True),
         ("no longer using Docker", threshold, True),
         ("now instead, we use Kubernetes", threshold, True),
         ("changed: deploy schedule is weekly", threshold, True),

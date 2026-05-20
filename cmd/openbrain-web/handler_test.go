@@ -11,7 +11,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/craig8/openbrain/internal/brain"
+	"github.com/windingriverholdings/openbrain/internal/brain"
 )
 
 // fakeWSRequest creates a minimal HTTP request for testing CheckOrigin.
@@ -35,18 +35,18 @@ func TestParseAllowedOrigins_Single(t *testing.T) {
 }
 
 func TestParseAllowedOrigins_Multiple(t *testing.T) {
-	result := parseAllowedOrigins("https://example.com, https://wr-s.net, http://localhost:3000")
-	assert.Equal(t, []string{"https://example.com", "https://wr-s.net", "http://localhost:3000"}, result)
+	result := parseAllowedOrigins("https://example.com, https://allowed.example.com, http://localhost:3000")
+	assert.Equal(t, []string{"https://example.com", "https://allowed.example.com", "http://localhost:3000"}, result)
 }
 
 func TestParseAllowedOrigins_TrimsWhitespace(t *testing.T) {
-	result := parseAllowedOrigins("  https://example.com , https://wr-s.net  ")
-	assert.Equal(t, []string{"https://example.com", "https://wr-s.net"}, result)
+	result := parseAllowedOrigins("  https://example.com , https://allowed.example.com  ")
+	assert.Equal(t, []string{"https://example.com", "https://allowed.example.com"}, result)
 }
 
 func TestParseAllowedOrigins_SkipsEmpty(t *testing.T) {
-	result := parseAllowedOrigins("https://example.com,,https://wr-s.net")
-	assert.Equal(t, []string{"https://example.com", "https://wr-s.net"}, result)
+	result := parseAllowedOrigins("https://example.com,,https://allowed.example.com")
+	assert.Equal(t, []string{"https://example.com", "https://allowed.example.com"}, result)
 }
 
 func TestNewUpgrader_NoAllowedOrigins_RejectsCrossOrigin(t *testing.T) {
@@ -72,14 +72,14 @@ func TestNewUpgrader_NoAllowedOrigins_AllowsNoOriginHeader(t *testing.T) {
 }
 
 func TestNewUpgrader_WithAllowedOrigins_AllowsListed(t *testing.T) {
-	upgrader := newUpgrader("https://example.com,https://wr-s.net")
+	upgrader := newUpgrader("https://example.com,https://allowed.example.com")
 
-	result := upgrader.CheckOrigin(fakeWSRequest("https://wr-s.net", "localhost:10203"))
+	result := upgrader.CheckOrigin(fakeWSRequest("https://allowed.example.com", "localhost:10203"))
 	assert.True(t, result, "should allow listed origin")
 }
 
 func TestNewUpgrader_WithAllowedOrigins_RejectsUnlisted(t *testing.T) {
-	upgrader := newUpgrader("https://example.com,https://wr-s.net")
+	upgrader := newUpgrader("https://example.com,https://allowed.example.com")
 
 	result := upgrader.CheckOrigin(fakeWSRequest("https://evil.com", "localhost:10203"))
 	assert.False(t, result, "should reject unlisted origin")

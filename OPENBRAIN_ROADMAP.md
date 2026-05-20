@@ -11,7 +11,7 @@ OpenBrain today: PostgreSQL 17 + pgvector (HNSW cosine, 384-dim bge-small-en-v1.
 
 What works well: capture UX, multi-interface access, typed thought taxonomy, self-hosted privacy, MCP integration with Claude Code.
 
-What needs improvement: search quality (vector-only, no keyword fallback), no fact versioning, no relationship graph, no automatic extraction from long-form input, no integration with ArtisanStation.
+What needs improvement: search quality (vector-only, no keyword fallback), no fact versioning, no relationship graph, no automatic extraction from long-form input.
 
 ---
 
@@ -115,7 +115,7 @@ Update `search_thoughts` MCP tool to use hybrid search by default. Add optional 
 
 ## Phase 2: Temporal Fact Tracking (1-2 Day Project)
 
-**Why second:** Your person and decision thought types naturally evolve over time. "Sarah wants corner booth" becomes "Sarah moved to booth 7" becomes "Sarah left Alley Kat." Without temporal tracking, you get contradictory thoughts cluttering search results.
+**Why second:** Your person and decision thought types naturally evolve over time. "Alice joined the platform team" becomes "Alice moved to infrastructure" becomes "Alice left the company." Without temporal tracking, you get contradictory thoughts cluttering search results.
 
 **What to build:**
 
@@ -135,7 +135,7 @@ CREATE INDEX idx_thoughts_current ON thoughts (is_current) WHERE is_current = TR
 CREATE TABLE thought_subjects (
   id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
   thought_id UUID NOT NULL REFERENCES thoughts(id) ON DELETE CASCADE,
-  subject_name TEXT NOT NULL,        -- normalized name: "sarah chen", "redis", "booth 7"
+  subject_name TEXT NOT NULL,        -- normalized name: "alice smith", "redis", "team B"
   subject_type VARCHAR(32),          -- person, tool, location, vendor, instructor, etc.
   created_at TIMESTAMPTZ DEFAULT NOW()
 );
@@ -166,7 +166,7 @@ $$ LANGUAGE plpgsql;
 Add supersede intent to the regex classifier in intent.py:
 
 ```
-"actually, Sarah moved to booth 7"     -> capture + supersede search for "Sarah" + "booth"
+"actually, Alice moved to team B"     -> capture + supersede search for "Alice" + "booth"
 "update: we switched from Redis to Valkey" -> capture + supersede search for "Redis"
 "correction: the rate limit is 2000, not 1000" -> capture + supersede matching thought
 ```
@@ -275,8 +275,8 @@ GET /api/graph/neighborhood/{name}?depth=2
 ```python
 # Graph node: a subject (person, tool, concept, location)
 {
-  "id": "sarah-chen",
-  "label": "Sarah Chen",
+  "id": "alice-smith",
+  "label": "Alice Smith",
   "type": "person",
   "thought_count": 12,
   "latest_thought": "2026-03-10T...",
@@ -285,8 +285,8 @@ GET /api/graph/neighborhood/{name}?depth=2
 
 # Graph edge: two subjects co-occurring in the same thought
 {
-  "source": "sarah-chen",
-  "target": "booth-7",
+  "source": "alice-smith",
+  "target": "team-b",
   "weight": 3,              # number of shared thoughts
   "thought_types": ["decision", "note"],
   "latest": "2026-03-10T..."
@@ -305,7 +305,7 @@ Features:
 - Filter by thought type, date range, tags
 - Search to center on a specific subject
 
-Keep it simple — this is a tool for you and Jeanette, not a product feature (yet).
+Keep it simple — this is a tool for you and the operator, not a product feature (yet).
 
 ### 4.4 Automatic subject extraction
 
@@ -317,85 +317,8 @@ When a thought is captured (either quick or deep capture), automatically extract
 
 For deep capture (Phase 3): the LLM already extracts subjects, so just store the links.
 
-**Validation:** After a few weeks of use, navigate to the graph view. You should see clusters — ArtisanStation-related subjects grouped together, thePUNShop subjects in another cluster, personal decisions in another. Click on "Sarah Chen" and see every thought you've ever captured about her, with connections to booths, classes, and decisions she's involved in.
+**Validation:** After a few weeks of use, navigate to the graph view. You should see clusters of related subjects, with the densest hubs around the people, projects, and topics you talk about most. Click on any subject and see every thought you've ever captured about it, with connections to related people and decisions.
 
----
-
-## Phase 5: ArtisanStation Integration (Ongoing)
-
-**Why last:** This builds on everything above and is the long-term payoff — turning OpenBrain from a personal tool into institutional infrastructure for your business.
-
-**What to build:**
-
-### 5.1 ArtisanStation-scoped MCP tools
-
-New MCP tools specifically for ArtisanStation agent workflows:
-
-```
-vendor_context(vendor_name)
-  → searches OpenBrain for all current thoughts about this vendor
-  → returns: preferences, history, notes, related people, booth history
-
-instructor_context(instructor_name)
-  → same for instructors: reliability notes, student feedback, scheduling patterns
-
-student_context(student_name)
-  → enrollment history, preferences, completion rates, notes
-
-location_context(booth_or_room)
-  → what you know about this physical space: who's been there, what works, issues
-```
-
-These are thin wrappers around hybrid_search + thought_timeline, scoped by tags or subjects.
-
-### 5.2 Capture hooks from ArtisanStation
-
-When things happen in ArtisanStation, automatically capture thoughts:
-
-```python
-# After a class is completed
-capture_thought(
-  content=f"{instructor} taught {class_name} on {date}. {attendance} students attended out of {capacity} capacity.",
-  thought_type="meeting",
-  tags=["artisanstation", "class", instructor_slug],
-  source="artisanstation-auto"
-)
-
-# After a booth assignment change
-capture_thought(
-  content=f"{vendor} moved from {old_booth} to {new_booth}.",
-  thought_type="note",
-  tags=["artisanstation", "booth", vendor_slug],
-  source="artisanstation-auto",
-  supersedes_query=f"{vendor} booth assignment"
-)
-
-# After a waiver is signed (DocuSeal integration)
-capture_thought(
-  content=f"{student} signed waiver for {class_name}.",
-  thought_type="note",
-  tags=["artisanstation", "waiver", student_slug],
-  source="docuseal-auto"
-)
-```
-
-### 5.3 Context panel in ArtisanStation UI
-
-Long-term goal: when viewing a vendor profile, instructor profile, or booking screen in ArtisanStation, show a "What we know" panel that pulls from OpenBrain.
-
-This could be as simple as an HTMX partial that calls `/api/search?q={entity_name}&tags=artisanstation&limit=5` and renders the results inline.
-
-### 5.4 Jeanette's workflow
-
-This is the real test. Jeanette is at the shop, a vendor asks about changing booths. She:
-
-1. Opens Telegram, messages OpenBrain: "what do I know about Mike's booth situation?"
-2. Gets back: Mike's current booth assignment, any previous notes about his preferences, relevant decisions about booth layout.
-3. Makes the decision, messages: "moved Mike from booth 3 to booth 5, he wanted more foot traffic near the entrance"
-4. OpenBrain captures this, supersedes the old booth assignment, links to Mike and both booth locations.
-5. Next time anyone (human or agent) asks about Mike or booth assignments, this context is there.
-
----
 
 ## Implementation Order Summary
 
@@ -405,7 +328,6 @@ This is the real test. Jeanette is at the shop, a vendor asks about changing boo
 | 2. Temporal Facts | 1-2 days | None (schema additions only) | High — solves contradictory thoughts problem |
 | 3. LLM Extraction | 2-3 days | Phase 2 (for supersede logic) | Medium — quality of life for heavy capture |
 | 4. Graph Visualization | 3-5 days | Phase 2 (for subject linking) | Medium — insight and navigation |
-| 5. ArtisanStation Integration | Ongoing | Phases 1-3 minimum | High — turns OpenBrain into business infrastructure |
 
 ---
 

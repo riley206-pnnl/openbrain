@@ -35,7 +35,7 @@
     "actual_needs_primary": true
   },
   {
-    "input_text": "update: Sarah moved to booth 7",
+    "input_text": "update: Alice moved to team B",
     "input_text_len": 30,
     "threshold": 500,
     "expected_needs_primary": true,

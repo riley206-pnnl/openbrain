@@ -7,7 +7,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/craig8/openbrain/internal/model"
+	"github.com/windingriverholdings/openbrain/internal/model"
 )
 
 // SupersedeThought marks an old thought as superseded by a new one.

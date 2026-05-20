@@ -9,7 +9,7 @@ import (
 	"log/slog"
 	"strings"
 
-	"github.com/craig8/openbrain/internal/llm"
+	"github.com/windingriverholdings/openbrain/internal/llm"
 )
 
 const extractionSystem = "You are a knowledge extraction assistant for a personal knowledge base. " +

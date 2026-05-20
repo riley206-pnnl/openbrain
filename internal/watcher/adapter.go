@@ -3,7 +3,7 @@ package watcher
 import (
 	"context"
 
-	"github.com/craig8/openbrain/internal/brain"
+	"github.com/windingriverholdings/openbrain/internal/brain"
 )
 
 // BrainAdapter wraps a *brain.Brain to satisfy the Ingester interface.

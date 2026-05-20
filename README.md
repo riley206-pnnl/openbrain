@@ -14,7 +14,7 @@ It's the missing long-term memory layer for your AI-assisted life.
 
 ```
 "What did I decide about the API architecture?"
-"Who is Sarah Chen and what do I know about her?"
+"Who is Alice Smith and what do I know about her?"
 "Give me a weekly review — what happened this week?"
 ```
 
@@ -169,9 +169,9 @@ OpenBrain understands natural language. Any of these work in the web UI or Teleg
 
 **Capture:**
 ```
-decided to use Postgres over MySQL for artisanstation
+decided to use Postgres over MySQL for the user service
 realised that deploys on Fridays are always risky
-met Jamie Chen — runs engineering at Acme, former Google
+met Bob Jones — runs engineering at Acme, former Google
 remember: the API rate limit is 1000 req/min
 ```
 
@@ -179,7 +179,7 @@ remember: the API rate limit is 1000 req/min
 ```
 what do I know about caching decisions?
 find: deployment lessons
-who is Jamie Chen?
+who is Bob Jones?
 ```
 
 **Review / stats:**
@@ -227,15 +227,6 @@ CREATE TABLE thoughts (
     updated_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 ```
-
----
-
-## Branches
-
-| Branch | Purpose |
-|---|---|
-| `work` | Standalone — Telegram bot, web UI, CLI, MCP server. No external agent dependencies. |
-| `personal` | Everything in `work` plus OpenClaw integration via file bridge for sandboxed agent environments. |
 
 ---
 

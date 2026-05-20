@@ -12,7 +12,7 @@ import (
 
 	"github.com/fsnotify/fsnotify"
 
-	"github.com/craig8/openbrain/internal/config"
+	"github.com/windingriverholdings/openbrain/internal/config"
 )
 
 // Ingester is the interface the watcher uses to ingest files. This allows

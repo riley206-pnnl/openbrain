@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/craig8/openbrain/internal/docparse"
+	"github.com/windingriverholdings/openbrain/internal/docparse"
 )
 
 // tempSuffixes are file extensions that indicate incomplete/temporary files.

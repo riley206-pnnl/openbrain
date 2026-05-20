@@ -54,7 +54,7 @@ type Config struct {
 	// OAuth (for Claude.ai MCP connector)
 	OAuthClientID     string `env:"OPENBRAIN_OAUTH_CLIENT_ID"`
 	OAuthClientSecret string `env:"OPENBRAIN_OAUTH_CLIENT_SECRET"`
-	OAuthIssuer       string `env:"OPENBRAIN_OAUTH_ISSUER" envDefault:"https://openbrain.wr-s.net"`
+	OAuthIssuer       string `env:"OPENBRAIN_OAUTH_ISSUER"`
 
 	// Retrieval
 	SearchTopK              int     `env:"OPENBRAIN_SEARCH_TOP_K" envDefault:"10"`
@@ -137,7 +137,9 @@ const minAuthTokenLen = 32
 const minMCPAuthTokenLen = minAuthTokenLen
 
 // validateMCPHTTP enforces that when MCP HTTP is enabled, a sufficiently
-// strong auth token is configured. Returns an error if validation fails.
+// strong auth token is configured and an OAuth issuer URL is set (required
+// by the OAuth 2.0 metadata endpoints that the transport mounts).
+// Returns an error if validation fails.
 func validateMCPHTTP(c *Config) error {
 	if !c.MCPHTTPEnabled {
 		return nil
@@ -147,6 +149,12 @@ func validateMCPHTTP(c *Config) error {
 	}
 	if len(c.MCPAuthToken) < minMCPAuthTokenLen {
 		return fmt.Errorf("OPENBRAIN_MCP_AUTH_TOKEN must be at least %d characters when OPENBRAIN_MCP_HTTP_ENABLED=true (got %d)", minMCPAuthTokenLen, len(c.MCPAuthToken))
+	}
+	if c.OAuthIssuer == "" {
+		return fmt.Errorf("OPENBRAIN_OAUTH_ISSUER is required when OPENBRAIN_MCP_HTTP_ENABLED=true (e.g. https://openbrain.example.com)")
+	}
+	if !strings.HasPrefix(c.OAuthIssuer, "https://") && !strings.HasPrefix(c.OAuthIssuer, "http://") {
+		return fmt.Errorf("OPENBRAIN_OAUTH_ISSUER must be a full URL with http:// or https:// scheme (got %q)", c.OAuthIssuer)
 	}
 	return nil
 }

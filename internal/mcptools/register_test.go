@@ -3,7 +3,7 @@ package mcptools_test
 import (
 	"testing"
 
-	"github.com/craig8/openbrain/internal/mcptools"
+	"github.com/windingriverholdings/openbrain/internal/mcptools"
 	"github.com/mark3labs/mcp-go/server"
 	"github.com/stretchr/testify/assert"
 )

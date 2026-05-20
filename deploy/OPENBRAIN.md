@@ -13,7 +13,7 @@ PATH=/workspace/.local/bin:$PATH openbrain <cmd> [args]
 
 ## When to USE OpenBrain
 
-**Search before answering** — if Craig asks about something he might have thought about before,
+**Search before answering** — if the user asks about something he might have thought about before,
 search OpenBrain first. Don't rely only on this session's context.
 
 ```bash
@@ -29,7 +29,7 @@ PATH=/workspace/.local/bin:$PATH openbrain capture \
   decision openclaw
 ```
 
-**Weekly review** — when Craig asks for a weekly review or summary:
+**Weekly review** — when the user asks for a weekly review or summary:
 
 ```bash
 PATH=/workspace/.local/bin:$PATH openbrain review 7
@@ -49,11 +49,11 @@ PATH=/workspace/.local/bin:$PATH openbrain stats
 |------|-------------|
 | `decision` | A choice made — technical, personal, strategic |
 | `insight` | A realisation or lesson learned |
-| `person` | Someone Craig mentioned — name, role, context |
+| `person` | Someone the user mentioned — name, role, context |
 | `meeting` | A call, conversation, or event |
 | `idea` | Something to explore or build |
 | `note` | General capture that doesn't fit above |
-| `memory` | Historical fact about Craig's life/work |
+| `memory` | Historical fact about the user's life/work |
 
 ---
 
@@ -65,13 +65,13 @@ PATH=/workspace/.local/bin:$PATH openbrain stats
 - People with context ("met [name] who...")
 - Commitments and action items
 - Project status changes
-- Opinions Craig expresses strongly
+- Opinions the user expresses strongly
 
 **DO NOT capture:**
 - Conversational back-and-forth
-- Questions Craig asks (unless the answer is the insight)
+- Questions the user asks (unless the answer is the insight)
 - Chitchat, jokes, casual chat
-- Anything Craig prefixes with "just curious" or "random thought"
+- Anything the user prefixes with "just curious" or "random thought"
 
 ---
 
@@ -83,5 +83,5 @@ PATH=/workspace/.local/bin:$PATH openbrain stats
 When you update MEMORY.md with something significant, also consider saving it
 to OpenBrain for future semantic retrieval.
 
-When Craig asks a question that might have a prior answer, search OpenBrain first,
+When the user asks a question that might have a prior answer, search OpenBrain first,
 then check MEMORY.md.

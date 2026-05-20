@@ -6,7 +6,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/craig8/openbrain/internal/model"
+	"github.com/windingriverholdings/openbrain/internal/model"
 )
 
 // GetStats returns aggregate statistics about the knowledge base.

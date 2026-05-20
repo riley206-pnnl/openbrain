@@ -11,11 +11,11 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/craig8/openbrain/internal/brain"
-	"github.com/craig8/openbrain/internal/config"
-	"github.com/craig8/openbrain/internal/db"
-	"github.com/craig8/openbrain/internal/embeddings"
-	"github.com/craig8/openbrain/internal/intent"
+	"github.com/windingriverholdings/openbrain/internal/brain"
+	"github.com/windingriverholdings/openbrain/internal/config"
+	"github.com/windingriverholdings/openbrain/internal/db"
+	"github.com/windingriverholdings/openbrain/internal/embeddings"
+	"github.com/windingriverholdings/openbrain/internal/intent"
 )
 
 func main() {

@@ -7,9 +7,9 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/craig8/openbrain/internal/brain"
-	"github.com/craig8/openbrain/internal/embeddings"
-	"github.com/craig8/openbrain/internal/mcptools"
+	"github.com/windingriverholdings/openbrain/internal/brain"
+	"github.com/windingriverholdings/openbrain/internal/embeddings"
+	"github.com/windingriverholdings/openbrain/internal/mcptools"
 	"github.com/mark3labs/mcp-go/server"
 )
 
