@@ -1,6 +1,7 @@
 package db
 
 import (
+	"fmt"
 	"os"
 	"testing"
 
@@ -26,13 +27,13 @@ func TestSearchThoughts_RejectsEmptyEmbedding(t *testing.T) {
 	// SearchThoughts must return a clear error when given an empty embedding
 	// vector, before ever hitting PostgreSQL.
 	_, err := SearchThoughts(
-		nil, // ctx — won't reach DB
-		nil, // pool — won't reach DB
-		[]float32{},  // empty embedding
-		10,           // topK
-		"",           // thoughtType
-		nil,          // tags
-		0.5,          // scoreThreshold
+		nil,         // ctx — won't reach DB
+		nil,         // pool — won't reach DB
+		[]float32{}, // empty embedding
+		10,          // topK
+		"",          // thoughtType
+		nil,         // tags
+		0.5,         // scoreThreshold
 	)
 
 	assert.Error(t, err, "SearchThoughts must reject empty embeddings")
@@ -43,7 +44,7 @@ func TestSearchThoughts_RejectsNilEmbedding(t *testing.T) {
 	_, err := SearchThoughts(
 		nil,
 		nil,
-		nil,          // nil embedding
+		nil, // nil embedding
 		10,
 		"",
 		nil,
@@ -61,13 +62,14 @@ func TestHybridSearchThoughts_RejectsEmptyEmbedding(t *testing.T) {
 		nil,
 		nil,
 		"test query",
-		[]float32{},  // empty embedding
-		10,            // topK
-		0.5,           // keywordWeight
-		0.5,           // semanticWeight
-		0.5,           // scoreThreshold
-		false,         // includeHistory
-		"",            // thoughtType
+		[]float32{}, // empty embedding
+		10,          // topK
+		0.5,         // keywordWeight
+		0.5,         // semanticWeight
+		0.5,         // scoreThreshold
+		false,       // includeHistory
+		"",          // thoughtType
+		768,         // embeddingDim
 	)
 
 	assert.Error(t, err, "HybridSearchThoughts must reject empty embeddings")
@@ -79,13 +81,14 @@ func TestHybridSearchThoughts_RejectsNilEmbedding(t *testing.T) {
 		nil,
 		nil,
 		"test query",
-		nil,           // nil embedding
+		nil, // nil embedding
 		10,
 		0.5,
 		0.5,
 		0.5,
 		false,
 		"",
+		768, // embeddingDim
 	)
 
 	assert.Error(t, err, "HybridSearchThoughts must reject nil embeddings")
@@ -106,28 +109,56 @@ func TestSearchThoughts_QueryExcludesNullEmbeddings(t *testing.T) {
 		"SearchThoughts query must exclude rows with NULL embeddings")
 }
 
-func TestHybridSearchThoughts_QueryPinsEmbeddingDimTo768(t *testing.T) {
+func TestBuildHybridSearchQuery_CastFollowsConfiguredDim(t *testing.T) {
 	// OB-053: The hybrid_search call MUST cast the embedding argument to
-	// vector(768) so the 8-arg overload resolves unambiguously and pgvector
-	// validates the active nomic-embed-text dimension. A bare ::vector cast (or
-	// any ::vector(384)) would either reintroduce ambiguity against legacy
-	// overloads ("function hybrid_search(...) is not unique") or silently allow
-	// a 384-dim drift. We assert against the constructed query text — the same
-	// source-inspection pattern used by TestSearchThoughts_QueryExcludesNullEmbeddings.
-	data, err := os.ReadFile("search.go")
-	require.NoError(t, err)
-	src := string(data)
+	// vector(<configured dim>) so the 8-arg overload resolves unambiguously
+	// and pgvector validates the active model's dimension. The dimension is
+	// config-driven (OPENBRAIN_EMBEDDING_DIM, default 768) and the thoughts
+	// column is deliberately model-agnostic (migration 008), so the cast must
+	// FOLLOW the configured dim rather than a hardcoded literal — otherwise a
+	// non-768 model (dimension_test.go exercises 384/1024) breaks search.
+	//
+	// Rather than string-match a literal, we drive the actual query builder and
+	// assert the semantic invariant: the cast dim equals the configured dim, and
+	// the embedding is never passed through a bare, undimensioned ::vector cast
+	// (which is what made overload resolution ambiguous).
+	tests := []struct {
+		name string
+		dim  int
+	}{
+		{name: "default nomic dim", dim: 768},
+		{name: "all-minilm dim", dim: 384},
+		{name: "large model dim", dim: 1024},
+	}
 
-	assert.Contains(t, src, "$2::vector(768)",
-		"hybrid_search call must pin the embedding argument to vector(768)")
-	assert.NotContains(t, src, "vector(384)",
-		"search must never reintroduce a 384-dim cast")
-	// The query must NOT pass the embedding through a bare, undimensioned
-	// ::vector cast to hybrid_search, which is what made overload resolution
-	// ambiguous. (SearchThoughts legitimately uses $1::vector against the bare
-	// column, so we scope this assertion to the hybrid_search call argument.)
-	assert.NotContains(t, src, "$2::vector,",
-		"hybrid_search embedding argument must not use a bare ::vector cast")
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			query := buildHybridSearchQuery(tt.dim)
+
+			wantCast := fmt.Sprintf("$2::vector(%d)", tt.dim)
+			assert.Contains(t, query, wantCast,
+				"hybrid_search embedding cast must use the configured dim")
+
+			// Never a bare, undimensioned ::vector cast on the embedding arg —
+			// that reintroduces overload ambiguity. The dimensioned cast above
+			// already proves the positive case; this guards the negative.
+			assert.NotContains(t, query, "$2::vector,",
+				"hybrid_search embedding argument must not use a bare ::vector cast")
+			assert.NotContains(t, query, "$2::vector)",
+				"hybrid_search embedding argument must not use a bare ::vector cast")
+		})
+	}
+}
+
+func TestBuildHybridSearchQuery_DefaultDimIs768(t *testing.T) {
+	// Guard the default: config.EmbeddingDim defaults to 768 (envDefault:"768"),
+	// so the out-of-the-box query must produce a vector(768) cast. Removing the
+	// hardcode must not change the default behavior.
+	query := buildHybridSearchQuery(768)
+	assert.Contains(t, query, "$2::vector(768)",
+		"default embedding dim must continue to produce a vector(768) cast")
+	assert.NotContains(t, query, "vector(384)",
+		"default query must never emit a 384-dim cast")
 }
 
 func TestHybridSearchNoDoubleThresholdFilter(t *testing.T) {
