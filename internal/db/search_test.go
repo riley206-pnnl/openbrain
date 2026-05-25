@@ -106,6 +106,30 @@ func TestSearchThoughts_QueryExcludesNullEmbeddings(t *testing.T) {
 		"SearchThoughts query must exclude rows with NULL embeddings")
 }
 
+func TestHybridSearchThoughts_QueryPinsEmbeddingDimTo768(t *testing.T) {
+	// OB-053: The hybrid_search call MUST cast the embedding argument to
+	// vector(768) so the 8-arg overload resolves unambiguously and pgvector
+	// validates the active nomic-embed-text dimension. A bare ::vector cast (or
+	// any ::vector(384)) would either reintroduce ambiguity against legacy
+	// overloads ("function hybrid_search(...) is not unique") or silently allow
+	// a 384-dim drift. We assert against the constructed query text — the same
+	// source-inspection pattern used by TestSearchThoughts_QueryExcludesNullEmbeddings.
+	data, err := os.ReadFile("search.go")
+	require.NoError(t, err)
+	src := string(data)
+
+	assert.Contains(t, src, "$2::vector(768)",
+		"hybrid_search call must pin the embedding argument to vector(768)")
+	assert.NotContains(t, src, "vector(384)",
+		"search must never reintroduce a 384-dim cast")
+	// The query must NOT pass the embedding through a bare, undimensioned
+	// ::vector cast to hybrid_search, which is what made overload resolution
+	// ambiguous. (SearchThoughts legitimately uses $1::vector against the bare
+	// column, so we scope this assertion to the hybrid_search call argument.)
+	assert.NotContains(t, src, "$2::vector,",
+		"hybrid_search embedding argument must not use a bare ::vector cast")
+}
+
 func TestHybridSearchNoDoubleThresholdFilter(t *testing.T) {
 	// The Go-side score threshold filter in HybridSearchThoughts should be
 	// removed since SQL already applies min_score. This is tested by

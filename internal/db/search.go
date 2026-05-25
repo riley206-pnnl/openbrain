@@ -77,10 +77,24 @@ func HybridSearchThoughts(ctx context.Context, p *pgxpool.Pool, queryText string
 		filterType = &thoughtType
 	}
 
+	// Fully type every argument so the 8-arg hybrid_search overload resolves
+	// unambiguously, even if a legacy 6-/7-arg overload is ever reintroduced
+	// (see sql/010_drop_legacy_hybrid_search_overloads.sql). The embedding is
+	// pinned to vector(768) — the project's model-agnostic column stores bare
+	// vectors, but the query cast must match the active nomic-embed-text dim so
+	// pgvector validates dimensionality and search never silently drifts to 384.
 	query := `
 		SELECT id::text, content, summary, thought_type::text,
 		       tags, source, created_at, combined_score
-		FROM hybrid_search($1, $2::vector, $3, $4, $5, $6, $7, $8)
+		FROM hybrid_search(
+		         $1::text,
+		         $2::vector(768),
+		         $3::integer,
+		         $4::double precision,
+		         $5::double precision,
+		         $6::double precision,
+		         $7::boolean,
+		         $8::text)
 		ORDER BY combined_score DESC LIMIT $9`
 
 	rows, err := p.Query(ctx, query,
