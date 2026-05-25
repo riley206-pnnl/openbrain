@@ -8,8 +8,6 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
-
-	"github.com/windingriverholdings/openbrain/internal/llm"
 )
 
 const extractionSystem = "You are a knowledge extraction assistant for a personal knowledge base. " +
@@ -135,9 +133,13 @@ func ParseExtractionResponse(raw string) []Candidate {
 
 // ExtractThoughts uses an LLM to extract structured thought candidates from long-form text.
 func ExtractThoughts(ctx context.Context, text string) ([]Candidate, error) {
-	provider, err := llm.GetProvider(ctx, text)
+	selector, err := getSelector()
 	if err != nil {
-		return nil, fmt.Errorf("get llm provider: %w", err)
+		return nil, fmt.Errorf("build llm selector: %w", err)
+	}
+	provider, err := selector.selectProvider(text)
+	if err != nil {
+		return nil, fmt.Errorf("select llm provider: %w", err)
 	}
 	if provider == nil {
 		return nil, nil

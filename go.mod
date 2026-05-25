@@ -13,6 +13,7 @@ require (
 	github.com/mark3labs/mcp-go v0.30.0
 	github.com/otiai10/gosseract/v2 v2.4.1
 	github.com/stretchr/testify v1.11.1
+	github.com/windingriverholdings/wrs-llm v0.1.0
 	golang.org/x/time v0.15.0
 )
 
@@ -26,7 +27,6 @@ require (
 	github.com/jackc/puddle/v2 v2.2.2 // indirect
 	github.com/pmezard/go-difflib v1.0.0 // indirect
 	github.com/spf13/cast v1.7.1 // indirect
-	github.com/windingriverholdings/wrs-llm v0.1.0 // indirect
 	github.com/yosida95/uritemplate/v3 v3.0.2 // indirect
 	golang.org/x/sync v0.20.0 // indirect
 	golang.org/x/sys v0.45.0 // indirect

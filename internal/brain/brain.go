@@ -16,7 +16,6 @@ import (
 	"github.com/windingriverholdings/openbrain/internal/embeddings"
 	"github.com/windingriverholdings/openbrain/internal/extract"
 	"github.com/windingriverholdings/openbrain/internal/intent"
-	"github.com/windingriverholdings/openbrain/internal/llm"
 	"github.com/windingriverholdings/openbrain/internal/model"
 )
 
@@ -210,7 +209,7 @@ func (b *Brain) DeepCapture(ctx context.Context, parsed intent.ParsedIntent, sou
 
 func (b *Brain) reload() (string, error) {
 	config.Reload()
-	llm.ResetProviders()
+	extract.ResetProviders()
 	return "Configuration reloaded from .env", nil
 }
 
