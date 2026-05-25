@@ -1,0 +1,153 @@
+# Tests CI — the primary required status check for openbrain's branch-protection
+# standard. Ported from openknowledge's test.yml, adapted for a Go-ONLY repo.
+#
+# ONE job, named verbatim so the (later) ruleset can require it by exact context:
+#   - "Unit tests" — Go build/vet/race-test (the only gate)
+#
+# DROPPED vs openknowledge (Go-only repo — no frontend):
+#   - The "Frontend build" job (Vite/TS lint + build) — openbrain has no web/,
+#     no package.json, no Node toolchain.
+#   - The web-dist upload/download artifact dance — openbrain has no
+#     `//go:embed all:dist`, so `go build ./...` needs no pre-built frontend.
+#   With the frontend job gone, "Unit tests" has NO `needs:` — it runs alone.
+#
+# WHY NO `paths:` FILTER
+#   A REQUIRED status check must report on EVERY PR/push to main. GitHub treats a
+#   required check that never runs as "pending" forever, which silently blocks
+#   merges. So this workflow has no paths filter — it always runs, always reports.
+#
+# RUNNER POLICY (DevOps rules)
+#   runs-on: self-hosted (NEVER ubuntu-latest). These are build/test jobs, not
+#   image PUSH jobs, so they do NOT need the `builder` label — that label marks
+#   DockerHub-push-capable runners (mns), not "has Docker." Any [self-hosted]
+#   runner works.
+#
+# WHY THE "Unit tests" JOB RUNS IN A CONTAINER
+#   `go test -race` requires cgo, which requires a C compiler. The self-hosted
+#   runners run with CGO_ENABLED=0 and have no host gcc, so `-race` directly on
+#   the host fails instantly with `go: -race requires cgo`. Rather than mutate
+#   the host (install gcc fleet-wide), the Unit tests job runs INSIDE the
+#   debian-based `golang:1.25` image, which ships gcc + git and enables cgo out
+#   of the box — so `-race` works with zero host changes. The floating `1.25`
+#   tag resolves to the latest 1.25.x (currently go1.25.10), matching openbrain's
+#   go.mod `go 1.25.0` minor line; a `go version` step asserts >= 1.25.10 so a
+#   surprise resolution is caught loudly — and 1.25.10 is the patch that clears
+#   the net / net/http stdlib CVEs (GO-2026-4971, GO-2026-4918) that govulncheck
+#   flags on older 1.25.x / pre-1.26.3 toolchains. The container provides Go, so
+#   setup-go is not used. CGO is left at its container default (enabled) — do NOT
+#   set CGO_ENABLED=0 or `-race` breaks again.
+#
+# NO TESSERACT / apt NEEDED
+#   openbrain's OCR path (internal/docparse/ocr.go) imports the cgo gosseract
+#   binding, but it is behind `//go:build ocr`. The DEFAULT build (no `ocr` tag)
+#   is pure-Go, so `go build`/`go vet`/`go test` here need no Tesseract, no apt,
+#   no extra system libraries — the stock golang:1.25 image is sufficient.
+#
+# MAKING THIS A REQUIRED CHECK
+#   Failing a job fails the PR's checks but does NOT block merge until the job is
+#   listed as a REQUIRED status check in main's ruleset (a later admin settings
+#   toggle). The exact context string is "Unit tests".
+
+name: Test
+
+# Always run on push to main and PRs into main. No paths filter — see header.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# CONCURRENCY: PER-REF SUPERSESSION
+#   This workflow's "Unit tests" job becomes a REQUIRED status check. For a
+#   required check, the concurrency mechanism MUST be per-ref, never a static
+#   cross-PR group. The group keys on the workflow name + the ref, so a newer
+#   push to the SAME PR/ref supersedes its own stale run (cancel-in-progress:
+#   true) — the surviving run reports the real, current status. It NEVER cancels
+#   another PR's run or another workflow's run.
+#
+# WHY A STATIC SHARED CROSS-PR GROUP WAS REJECTED
+#   A static group shared across PRs protects only the RUNNING slot. GitHub keeps
+#   at most 1 running + 1 pending per group, newest-wins: under dependabot
+#   volume, a newer trigger EVICTS the older *pending* run, which GitHub marks
+#   `cancelled`. Once this job is a REQUIRED check, a `cancelled` run is a
+#   non-success status -> mergeStateStatus=BLOCKED -> the losing PR silently
+#   starves with no way to recover but a manual re-run. This is the documented
+#   wrs-commerce "cancelled-check-poisons-rollup" hazard. A static cross-PR
+#   throttle is the wrong tool for gating required checks.
+#
+# IF FLEET-LEVEL THROTTLING IS STILL WANTED
+#   Cap concurrency at the RUNNER layer (runner group / runner count), NOT via a
+#   workflow `concurrency:` group. The runner layer queues jobs without ever
+#   stamping a required check `cancelled`, so it throttles capacity without
+#   poisoning the merge rollup.
+concurrency:
+  group: "${{ github.workflow }}-${{ github.ref }}"
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Go build + vet + race-tests. This is the primary (and only) gate. Runs
+  # INSIDE the golang:1.25 container so cgo/gcc are present and `go test -race`
+  # works on the self-hosted runner (see header). No `needs:` — there is no
+  # frontend job to depend on.
+  # ---------------------------------------------------------------------------
+  unit-tests:
+    name: Unit tests
+    runs-on: self-hosted
+    container:
+      image: golang:1.25
+      # Run as the self-hosted runner's user (uid/gid 1000 = craig8), NOT the
+      # image default of root. Two reasons: (1) the runner owns the workspace as
+      # uid 1000, so a root container would leave root-owned files behind in the
+      # uid-1000 work tree; matching uids keeps ownership clean. (2) Correctness:
+      # any test that asserts a write into a no-write (0o555) dir FAILS would pass
+      # spuriously under root, which bypasses DAC permission bits. Running as a
+      # non-root uid makes such permission checks real, matching the host runner.
+      # HOME is redirected to a writable path because uid 1000 may not exist in
+      # the image's /etc/passwd (no home dir).
+      options: --user 1000:1000
+    env:
+      HOME: /tmp
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      # Assert the container's Go matches openbrain's toolchain line (>= 1.25.10).
+      # Fails loudly if the floating golang:1.25 tag ever resolves lower. 1.25.10
+      # is also the patch that clears the net / net/http stdlib CVEs.
+      - name: Go version (confirm >= 1.25.10)
+        run: |
+          go version
+          go_ver="$(go env GOVERSION)"   # e.g. go1.25.10
+          min="go1.25.10"
+          lowest="$(printf '%s\n%s\n' "$min" "$go_ver" | sort -V | head -n1)"
+          if [ "$lowest" != "$min" ]; then
+            echo "::error::container Go $go_ver is older than required $min"
+            exit 1
+          fi
+          echo "Go $go_ver OK (>= $min)"
+
+      # cgo must be on for -race. Debian golang enables it by default; assert it.
+      - name: Confirm cgo is enabled (required for -race)
+        run: |
+          cgo="$(go env CGO_ENABLED)"
+          echo "CGO_ENABLED=$cgo"
+          if [ "$cgo" != "1" ]; then
+            echo "::error::CGO_ENABLED=$cgo — go test -race requires cgo"
+            exit 1
+          fi
+
+      - name: Verify module
+        run: go mod verify
+
+      - name: Build
+        run: go build ./...
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Unit tests (race detector)
+        run: go test -race -count=1 ./...
