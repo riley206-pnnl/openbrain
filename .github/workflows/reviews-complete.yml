@@ -21,16 +21,16 @@
 #
 # TOOL-FREE BY DESIGN (no jq, no make, no runner-provided binary)
 # ---------------------------------------------------------------
-# The previous version of this gate shelled out to `jq` to test each label.
-# `jq` is NOT installed on our self-hosted runner, so the gate failed closed
-# on EVERY PR ("jq not installed on runner") and BLOCKED ALL MERGES — the
+# An earlier version of this gate shelled out to `jq` to test each label,
+# which failed closed on runners that lacked jq and BLOCKED ALL MERGES — the
 # required check could never go green. This version removes that dependency
 # entirely: label membership is evaluated by GitHub Actions' built-in
 # expression `contains(github.event.pull_request.labels.*.name, '<label>')`,
 # which GitHub resolves on its own infrastructure BEFORE the runner executes
 # anything. The runner only ever runs `echo`, `[`/`test`, and `exit` — pure
 # shell builtins, no external program. Nothing has to be installed on the
-# runner for this gate to work.
+# runner for this gate to work, so it runs anywhere — which is why moving from
+# self-hosted to ubuntu-latest (public-repo carve-out) is a no-op for it.
 #
 # WHY contains() IS ALSO MORE CORRECT THAN THE jq VERSION
 # -------------------------------------------------------
@@ -93,7 +93,7 @@ permissions:
 jobs:
   reviews-complete:
     name: reviews-complete
-    runs-on: self-hosted
+    runs-on: ubuntu-latest
     steps:
       - name: Verify all review labels present
         env:
