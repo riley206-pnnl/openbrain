@@ -16,7 +16,6 @@ import (
 	"github.com/windingriverholdings/openbrain/internal/embeddings"
 	"github.com/windingriverholdings/openbrain/internal/extract"
 	"github.com/windingriverholdings/openbrain/internal/intent"
-	"github.com/windingriverholdings/openbrain/internal/llm"
 	"github.com/windingriverholdings/openbrain/internal/model"
 )
 
@@ -25,11 +24,21 @@ type Brain struct {
 	pool     *pgxpool.Pool
 	embedder embeddings.Embedder
 	cfg      *config.Config
+
+	// extractFn and captureFn are seams over the LLM extraction call and the
+	// single-note fallback capture, defaulted in New to the real
+	// implementations. They exist so DeepCapture's loud-fallback behavior is
+	// testable without a live LLM or database.
+	extractFn func(ctx context.Context, text string) ([]extract.Candidate, error)
+	captureFn func(ctx context.Context, parsed intent.ParsedIntent, source string) (string, error)
 }
 
 // New creates a Brain with the given dependencies.
 func New(pool *pgxpool.Pool, embedder embeddings.Embedder, cfg *config.Config) *Brain {
-	return &Brain{pool: pool, embedder: embedder, cfg: cfg}
+	b := &Brain{pool: pool, embedder: embedder, cfg: cfg}
+	b.extractFn = extract.ExtractThoughts
+	b.captureFn = b.Capture
+	return b
 }
 
 // Dispatch routes a parsed intent to the appropriate handler.
@@ -192,14 +201,23 @@ func (b *Brain) Supersede(ctx context.Context, parsed intent.ParsedIntent, sourc
 // DeepCapture extracts multiple thoughts from long text via LLM.
 // Uses the shared captureExtracted helper (also used by DeepCaptureWithMeta).
 func (b *Brain) DeepCapture(ctx context.Context, parsed intent.ParsedIntent, source string) (string, error) {
-	candidates, err := extract.ExtractThoughts(ctx, parsed.Text)
+	candidates, err := b.extractFn(ctx, parsed.Text)
 	if err != nil {
-		slog.Warn("extraction failed, falling back to simple capture", "error", err)
-		return b.Capture(ctx, parsed, source)
+		// Loud fallback: still persist the raw note (never lose the user's
+		// input), but make the degradation LOUD — log at Error and annotate
+		// the returned confirmation so the user can tell from the response
+		// alone that extraction did not happen.
+		slog.Error("deep capture: extraction failed, stored as single note",
+			"error", fmt.Errorf("deep capture: extraction failed: %w", err))
+		confirmation, capErr := b.captureFn(ctx, parsed, source)
+		if capErr != nil {
+			return "", capErr
+		}
+		return fmt.Sprintf("⚠ extraction failed (%v) — stored as a single note: %s", err, confirmation), nil
 	}
 
 	if len(candidates) == 0 {
-		return b.Capture(ctx, parsed, source)
+		return b.captureFn(ctx, parsed, source)
 	}
 
 	captured, errs := captureExtracted(ctx, b, candidates, source, nil)
@@ -210,7 +228,7 @@ func (b *Brain) DeepCapture(ctx context.Context, parsed intent.ParsedIntent, sou
 
 func (b *Brain) reload() (string, error) {
 	config.Reload()
-	llm.ResetProviders()
+	extract.ResetProviders()
 	return "Configuration reloaded from .env", nil
 }
 
