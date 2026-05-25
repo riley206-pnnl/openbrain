@@ -1,0 +1,148 @@
+# reviews-complete — label-based review gate
+#
+# Ported from openknowledge (which ported it from wrs-commerce, the original
+# reference template whose ruleset 16788132 references this exact
+# `reviews-complete` context). This is part of openbrain's branch-protection
+# standard. The mechanism below is replicated EXACTLY — only this provenance
+# note is repo-specific.
+#
+# WHY THIS EXISTS
+# ---------------
+# Our PR reviews are performed by dispatched AI agents (Dutch, Leon,
+# test-analyzer, silent-failure-hunter), NOT by human GitHub reviewers.
+# Those agents cannot click "Approve" in the GitHub UI, so GitHub's native
+# "required approving reviews" branch-protection control is useless to us.
+#
+# GitHub also has NO native way to require that a PR carry specific labels
+# before merge. So we synthesize that control here: this workflow IS the
+# approval substitute. A repository ruleset marks the `reviews-complete`
+# check as a required status check. With that in place, a PR cannot merge
+# until all four review labels are present.
+#
+# TOOL-FREE BY DESIGN (no jq, no make, no runner-provided binary)
+# ---------------------------------------------------------------
+# The previous version of this gate shelled out to `jq` to test each label.
+# `jq` is NOT installed on our self-hosted runner, so the gate failed closed
+# on EVERY PR ("jq not installed on runner") and BLOCKED ALL MERGES — the
+# required check could never go green. This version removes that dependency
+# entirely: label membership is evaluated by GitHub Actions' built-in
+# expression `contains(github.event.pull_request.labels.*.name, '<label>')`,
+# which GitHub resolves on its own infrastructure BEFORE the runner executes
+# anything. The runner only ever runs `echo`, `[`/`test`, and `exit` — pure
+# shell builtins, no external program. Nothing has to be installed on the
+# runner for this gate to work.
+#
+# WHY contains() IS ALSO MORE CORRECT THAN THE jq VERSION
+# -------------------------------------------------------
+# `contains(array, item)` performs EXACT element equality across array
+# elements. It is NOT a substring test when the left operand is an array.
+# That inherently avoids BOTH bugs the jq version had to hand-guard against:
+#   - substring false-positives (a label "reviewed:leon-draft" can never
+#     satisfy "reviewed:leon"), and
+#   - newline-split false-positives (a single label whose literal name
+#     embeds newlines cannot flatten into several matches),
+# with no `-Fxq`, no element flattening, no array-iteration footwork.
+#
+# FAIL-CLOSED CONTRACT
+# --------------------
+# The job EXITS NON-ZERO (red check) unless ALL FOUR of these labels are
+# present on the PR:
+#   - reviewed:dutch
+#   - reviewed:leon
+#   - reviewed:test-analyzer
+#   - reviewed:silent-failure
+# `contains()` returns the literal string "false" for any absent label, so
+# the gate passes ONLY when the bash AND of all four results is the exact
+# string "true". Zero labels => all four "false" => RED. Any one missing =>
+# that one "false" => RED. The default branch of the bash check is failure,
+# so an unexpected value (anything other than the exact string "true") also
+# fails closed. Reviewers add a label only after their review passes; a label
+# being removed (e.g. new commits invalidate a prior review) re-opens the gate.
+#
+# RE-RUNS ON LABEL CHANGE
+# -----------------------
+# The `labeled` and `unlabeled` trigger types make the check re-evaluate
+# the moment a label is added or removed, so the required check flips
+# green/red without needing a new commit push.
+#
+# NOTE: job name and the required-check context must stay identical
+# ("reviews-complete") — the ruleset references this exact string.
+
+name: reviews-complete
+
+on:
+  pull_request:
+    # Scoped to PRs targeting main — matches the "every PR to main" intent.
+    branches: [main]
+    # NO `paths:` filter on purpose. A required status check that is
+    # path-filtered will hang "Expected — Waiting for status to be
+    # reported" forever on PRs that touch no matching path, blocking
+    # merge permanently. This gate must run on EVERY PR to main.
+    types: [opened, reopened, synchronize, labeled, unlabeled]
+
+concurrency:
+  group: reviews-complete-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  # Only contents:read is needed — label membership is evaluated by GitHub
+  # in the workflow expressions below (github.event.pull_request.labels),
+  # straight from the event payload, with no GitHub API call.
+  contents: read
+
+jobs:
+  reviews-complete:
+    name: reviews-complete
+    runs-on: self-hosted
+    steps:
+      - name: Verify all review labels present
+        env:
+          # Each value is resolved by GitHub Actions BEFORE the runner runs
+          # anything — the runner receives the literal string "true" or
+          # "false". These are gate-controlled booleans, never untrusted
+          # user content, and they are referenced only as quoted shell
+          # variables below (never inlined into the run: block), so no
+          # injection surface exists. No tool, no API call, no JSON parsing.
+          #
+          # INVARIANT (load-bearing): `github.event.pull_request.labels.*.name`
+          # MUST be a JSON ARRAY of name strings, e.g.
+          # ["reviewed:dutch","reviewed:leon"]. `contains(array, item)` tests
+          # EXACT element equality over that array. If this source were ever
+          # changed to a non-array shape, `contains()` semantics would shift
+          # (string/object `contains` is a substring/key test) and the
+          # fail-closed logic would no longer hold — re-validate the gate
+          # before changing this shape.
+          HAS_DUTCH: ${{ contains(github.event.pull_request.labels.*.name, 'reviewed:dutch') }}
+          HAS_LEON: ${{ contains(github.event.pull_request.labels.*.name, 'reviewed:leon') }}
+          HAS_TEST_ANALYZER: ${{ contains(github.event.pull_request.labels.*.name, 'reviewed:test-analyzer') }}
+          HAS_SILENT_FAILURE: ${{ contains(github.event.pull_request.labels.*.name, 'reviewed:silent-failure') }}
+        run: |
+          set -euo pipefail
+
+          # Pure shell builtins only below: `echo`, `[`/`test`, and `exit`.
+          # No external program is invoked, so nothing needs to be installed
+          # on the runner for this gate to work.
+
+          echo "Review label presence (resolved by GitHub before runner exec):"
+          echo "  reviewed:dutch          = ${HAS_DUTCH}"
+          echo "  reviewed:leon           = ${HAS_LEON}"
+          echo "  reviewed:test-analyzer  = ${HAS_TEST_ANALYZER}"
+          echo "  reviewed:silent-failure = ${HAS_SILENT_FAILURE}"
+
+          # Fail closed: pass ONLY when every flag is the exact string "true".
+          # Any other value (notably "false" for an absent label) falls to the
+          # else branch and exits non-zero.
+          if [ "${HAS_DUTCH}" = "true" ] \
+            && [ "${HAS_LEON}" = "true" ] \
+            && [ "${HAS_TEST_ANALYZER}" = "true" ] \
+            && [ "${HAS_SILENT_FAILURE}" = "true" ]; then
+            echo "All four review labels present — review gate PASSED."
+          else
+            echo "::error::Review gate FAILED — one or more required labels missing."
+            echo "All four review labels must be present before this PR can merge:"
+            echo "  - reviewed:dutch"
+            echo "  - reviewed:leon"
+            echo "  - reviewed:test-analyzer"
+            echo "  - reviewed:silent-failure"
+            exit 1
+          fi
