@@ -1,4 +1,7 @@
 .env
+.env.*
+!.env.example
+*.bak
 .pixi/
 fastembed_cache/
 __pycache__/
@@ -14,6 +17,7 @@ logs/
 
 # Go
 bin/
+/openbrain-web
 openbrain-mcp
 coverage.out
 
