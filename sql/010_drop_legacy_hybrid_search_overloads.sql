@@ -20,11 +20,16 @@
 -- REPLACED the 007 8-arg in place; it did not add a fourth overload.
 --
 -- The 8-arg overload (as last replaced by 008, with the model-agnostic
--- untyped `vector` parameter) is the intended live signature. The 6-arg and
--- 7-arg overloads are dead code: nothing calls them, and because their
--- argument-type prefix is identical to the 8-arg, they make overload
--- resolution ambiguous when a caller's argument types are not fully pinned —
--- the source of the runtime error:
+-- untyped `vector` parameter) is the intended live signature. The 6-arg is
+-- unused, but the 7-arg is still called by the legacy Python server
+-- (src/openbrain/db.py issues a 7-positional `hybrid_search($1, $2::vector, ...)`
+-- with a bare ::vector cast). A 7-positional call rebinds to the surviving 8-arg
+-- because its `filter_type text` parameter defaults to NULL, so dropping the
+-- 7-arg here does not break that caller (and if it somehow did not rebind,
+-- asyncpg would raise a LOUD UndefinedFunctionError, not silently return empty).
+-- Because their argument-type prefix is identical to the 8-arg, the 6-/7-arg
+-- overloads make overload resolution ambiguous when a caller's argument types
+-- are not fully pinned — the source of the runtime error:
 --
 --   ERROR: function hybrid_search(...) is not unique
 --
