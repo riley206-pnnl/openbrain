@@ -1,0 +1,123 @@
+# Tests CI — the primary required status check for openbrain's branch-protection
+# standard. Ported from openknowledge's test.yml, adapted for a Go-ONLY repo.
+#
+# ONE job, named verbatim so the (later) ruleset can require it by exact context:
+#   - "Unit tests" — Go build/vet/race-test (the only gate)
+#
+# DROPPED vs openknowledge (Go-only repo — no frontend):
+#   - The "Frontend build" job (Vite/TS lint + build) — openbrain has no web/,
+#     no package.json, no Node toolchain.
+#   - The web-dist upload/download artifact dance — openbrain has no
+#     `//go:embed all:dist`, so `go build ./...` needs no pre-built frontend.
+#   With the frontend job gone, "Unit tests" has NO `needs:` — it runs alone.
+#
+# WHY NO `paths:` FILTER
+#   A REQUIRED status check must report on EVERY PR/push to main. GitHub treats a
+#   required check that never runs as "pending" forever, which silently blocks
+#   merges. So this workflow has no paths filter — it always runs, always reports.
+#
+# RUNNER POLICY (PUBLIC-REPO CARVE-OUT to the "self-hosted only" DevOps rule)
+#   runs-on: ubuntu-latest. openbrain is a PUBLIC repo, and the private
+#   self-hosted fleet denies public repos (a public repo on a self-hosted runner
+#   is a code-execution exposure — any fork PR could run on our infra). GitHub-
+#   hosted runners are FREE for public repos and fully sandboxed (fresh ephemeral
+#   VM per job), so they are the correct fit here. This is a deliberate,
+#   documented exception scoped to PUBLIC repos only — private repos still use
+#   the self-hosted fleet per the standard DevOps rule.
+#
+# WHY THE "Unit tests" JOB NO LONGER USES A CONTAINER
+#   The self-hosted version ran inside the golang:1.25 container purely to get a
+#   C compiler for `go test -race` (the fleet runs CGO_ENABLED=0 with no host
+#   gcc). ubuntu-latest ships gcc / build-essential and enables cgo by default,
+#   so `-race` works NATIVELY on the host with no container. We provision Go via
+#   actions/setup-go pinned to go1.25.10 — the CVE-clean patch matching
+#   openbrain's go.mod `go 1.25.0` minor line (1.25.10 clears the net / net/http
+#   stdlib CVEs GO-2026-4971, GO-2026-4918 that older 1.25.x toolchains flag).
+#   No container, no go-version assertion step, no cgo-confirm step — setup-go
+#   gives us the exact pinned toolchain and the runner already has cgo + gcc.
+#
+# NO TESSERACT / apt NEEDED
+#   openbrain's OCR path (internal/docparse/ocr.go) imports the cgo gosseract
+#   binding, but it is behind `//go:build ocr`. The DEFAULT build (no `ocr` tag)
+#   is pure-Go, so `go build`/`go vet`/`go test` here need no Tesseract, no apt,
+#   no extra system libraries — the stock ubuntu-latest runner is sufficient.
+#
+# MAKING THIS A REQUIRED CHECK
+#   Failing a job fails the PR's checks but does NOT block merge until the job is
+#   listed as a REQUIRED status check in main's ruleset (a later admin settings
+#   toggle). The exact context string is "Unit tests".
+
+name: Test
+
+# Always run on push to main and PRs into main. No paths filter — see header.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# CONCURRENCY: PER-REF SUPERSESSION
+#   This workflow's "Unit tests" job becomes a REQUIRED status check. For a
+#   required check, the concurrency mechanism MUST be per-ref, never a static
+#   cross-PR group. The group keys on the workflow name + the ref, so a newer
+#   push to the SAME PR/ref supersedes its own stale run (cancel-in-progress:
+#   true) — the surviving run reports the real, current status. It NEVER cancels
+#   another PR's run or another workflow's run.
+#
+# WHY A STATIC SHARED CROSS-PR GROUP WAS REJECTED
+#   A static group shared across PRs protects only the RUNNING slot. GitHub keeps
+#   at most 1 running + 1 pending per group, newest-wins: under dependabot
+#   volume, a newer trigger EVICTS the older *pending* run, which GitHub marks
+#   `cancelled`. Once this job is a REQUIRED check, a `cancelled` run is a
+#   non-success status -> mergeStateStatus=BLOCKED -> the losing PR silently
+#   starves with no way to recover but a manual re-run. This is the documented
+#   wrs-commerce "cancelled-check-poisons-rollup" hazard. A static cross-PR
+#   throttle is the wrong tool for gating required checks.
+#
+# IF FLEET-LEVEL THROTTLING IS STILL WANTED
+#   Cap concurrency at the RUNNER layer (runner group / runner count), NOT via a
+#   workflow `concurrency:` group. The runner layer queues jobs without ever
+#   stamping a required check `cancelled`, so it throttles capacity without
+#   poisoning the merge rollup.
+concurrency:
+  group: "${{ github.workflow }}-${{ github.ref }}"
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Go build + vet + race-tests. This is the primary (and only) gate. Runs
+  # directly on ubuntu-latest — the runner ships gcc + cgo, so `go test -race`
+  # works natively with no container (see header). No `needs:` — there is no
+  # frontend job to depend on.
+  # ---------------------------------------------------------------------------
+  unit-tests:
+    name: Unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      # Provision the exact pinned toolchain: go1.25.10 (the CVE-clean patch on
+      # openbrain's go.mod `go 1.25.0` minor line). cache:false keeps the job
+      # self-contained and avoids cross-run cache state. ubuntu-latest already
+      # has gcc/build-essential, so cgo is enabled by default for `-race`.
+      - name: Set up Go (pinned 1.25.10)
+        uses: actions/setup-go@v6
+        with:
+          go-version: '1.25.10'
+          cache: false
+
+      - name: Verify module
+        run: go mod verify
+
+      - name: Build
+        run: go build ./...
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Unit tests (race detector)
+        run: go test -race -count=1 ./...

@@ -1,0 +1,64 @@
+# Dependabot configuration — openbrain
+#
+# Part of the org-wide CVE-gate standard: the cve-gate workflow DETECTS known-
+# vuln / stale-toolchain exposure on every PR; Dependabot is the REMEDIATION
+# arm — it opens the dependency-bump PRs that clear those findings.
+#
+# Two layers of Dependabot coverage, configured in two separate places:
+#   1. VERSION updates (this file) — scheduled bumps to keep deps current.
+#   2. SECURITY updates (repo setting, not here) — auto-PRs for known-vuln deps,
+#      enabled via the repo's security_and_analysis settings.
+#
+# DROPPED vs openknowledge (Go-only repo):
+#   - npm ecosystem — openbrain has no web frontend (no web/package.json).
+#   - docker ecosystem — openbrain deploys via systemd, not a container image
+#     (no Dockerfile FROM pins to track). The Go-toolchain stale-CVE class
+#     (KM-177 lineage) is instead surfaced by govulncheck against the go.mod
+#     `go` directive; bump go.mod's toolchain line to clear it.
+#
+# Weekly cadence, Monday early-morning America/Los_Angeles, so review-team
+# capacity is spent on dependency PRs at the start of the week, not mid-sprint.
+version: 2
+
+updates:
+  # ---------------------------------------------------------------------------
+  # Go modules — the backend (go.mod / go.sum live at repo root).
+  # Minor + patch bumps are grouped into ONE PR to keep noise down; majors stay
+  # separate so a breaking bump is reviewed on its own.
+  # ---------------------------------------------------------------------------
+  - package-ecosystem: "gomod"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "06:00"
+      timezone: "America/Los_Angeles"
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "chore(deps)"
+    groups:
+      gomod-minor-patch:
+        update-types:
+          - "minor"
+          - "patch"
+
+  # ---------------------------------------------------------------------------
+  # GitHub Actions — watches the action pins in .github/workflows/.
+  # Keeps checkout / setup-go action versions current so the CVE gate itself
+  # doesn't run on stale, vulnerable actions.
+  # ---------------------------------------------------------------------------
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "06:00"
+      timezone: "America/Los_Angeles"
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "chore(deps)"
+    groups:
+      github-actions-minor-patch:
+        update-types:
+          - "minor"
+          - "patch"

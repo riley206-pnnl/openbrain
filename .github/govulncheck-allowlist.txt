@@ -1,0 +1,36 @@
+# govulncheck CVE allowlist (KM-178)
+#
+# govulncheck has no native ignore/suppress mechanism. This file is the
+# relief valve: the cve-gate workflow's govulncheck job runs `govulncheck
+# -json ./...`, extracts every reachable finding's OSV id, and fails ONLY on
+# findings whose id is NOT listed here.
+#
+# WHY THIS EXISTS
+# govulncheck pulls a fresh vulnerability DB on every run (vuln.go.dev updates
+# daily). A newly-published CVE in a dependency you have not touched can fail
+# an otherwise-unrelated PR. That is the gate working as designed — but it can
+# hard-block work that has nothing to do with the new advisory. When that
+# happens, the operator has two choices:
+#   1. (Preferred) Fix the finding — bump the dep / Go toolchain that clears it.
+#   2. (Relief valve) Add the OSV/GO id here with a tracked justification, so
+#      the gate stops blocking while a follow-up card handles the real fix.
+#
+# RULES
+#   - One id per line. Format: the govulncheck OSV id, e.g. GO-2026-4971.
+#   - Blank lines and lines starting with '#' are ignored.
+#   - Inline trailing comments are NOT supported — put justification on the
+#     comment line ABOVE the id (see format below).
+#   - EVERY entry MUST be justified. An unjustified suppression is a silent
+#     security hole; reviewers (Leon) reject allowlist additions without a
+#     reason + tracking card.
+#
+# FORMAT (copy this block per entry):
+#   # <date> <who> — <one-line reason> — tracked in KM-XXX
+#   GO-YYYY-NNNN
+#
+# An empty allowlist (this file with only comments) means: fail on ANY
+# reachable finding. That is the intended steady state. Entries here are
+# temporary by definition — each should reference a card that removes it.
+#
+# ---------------------------------------------------------------------------
+# (no active suppressions — steady state: the gate fails on any finding)
