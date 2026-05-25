@@ -62,9 +62,40 @@ func SearchThoughts(ctx context.Context, p *pgxpool.Pool, embedding []float32, t
 	return results, rows.Err()
 }
 
+// buildHybridSearchQuery constructs the hybrid_search SQL with every argument
+// fully typed so the 8-arg overload resolves unambiguously, even if a legacy
+// 6-/7-arg overload is ever reintroduced (see
+// sql/010_drop_legacy_hybrid_search_overloads.sql).
+//
+// The embedding cast is dimensioned to embeddingDim — the configured
+// OPENBRAIN_EMBEDDING_DIM (default 768). The thoughts column is deliberately a
+// model-agnostic bare `vector` (migration 008), but the query cast must match
+// the active embedding model's dimension so pgvector validates dimensionality
+// and search never silently drifts to a different dim (e.g. a stray 384 model).
+// Hardcoding 768 here would break search whenever a non-768 model is configured
+// (dimension_test.go exercises 384/1024), so the dim is threaded from config.
+func buildHybridSearchQuery(embeddingDim int) string {
+	return fmt.Sprintf(`
+		SELECT id::text, content, summary, thought_type::text,
+		       tags, source, created_at, combined_score
+		FROM hybrid_search(
+		         $1::text,
+		         $2::vector(%d),
+		         $3::integer,
+		         $4::double precision,
+		         $5::double precision,
+		         $6::double precision,
+		         $7::boolean,
+		         $8::text)
+		ORDER BY combined_score DESC LIMIT $9`, embeddingDim)
+}
+
 // HybridSearchThoughts performs combined keyword (BM25) + semantic (cosine) search.
 // thoughtType filters results to a specific thought_type; pass "" to skip filtering.
-func HybridSearchThoughts(ctx context.Context, p *pgxpool.Pool, queryText string, embedding []float32, topK int, keywordWeight, semanticWeight, scoreThreshold float64, includeHistory bool, thoughtType string) ([]model.ThoughtRow, error) {
+// embeddingDim is the active model's dimension (OPENBRAIN_EMBEDDING_DIM); the
+// embedding argument is cast to vector(embeddingDim) so pgvector validates the
+// dimension and overload resolution stays unambiguous.
+func HybridSearchThoughts(ctx context.Context, p *pgxpool.Pool, queryText string, embedding []float32, topK int, keywordWeight, semanticWeight, scoreThreshold float64, includeHistory bool, thoughtType string, embeddingDim int) ([]model.ThoughtRow, error) {
 	if len(embedding) == 0 {
 		return nil, fmt.Errorf("search: empty embedding vector")
 	}
@@ -77,25 +108,7 @@ func HybridSearchThoughts(ctx context.Context, p *pgxpool.Pool, queryText string
 		filterType = &thoughtType
 	}
 
-	// Fully type every argument so the 8-arg hybrid_search overload resolves
-	// unambiguously, even if a legacy 6-/7-arg overload is ever reintroduced
-	// (see sql/010_drop_legacy_hybrid_search_overloads.sql). The embedding is
-	// pinned to vector(768) — the project's model-agnostic column stores bare
-	// vectors, but the query cast must match the active nomic-embed-text dim so
-	// pgvector validates dimensionality and search never silently drifts to 384.
-	query := `
-		SELECT id::text, content, summary, thought_type::text,
-		       tags, source, created_at, combined_score
-		FROM hybrid_search(
-		         $1::text,
-		         $2::vector(768),
-		         $3::integer,
-		         $4::double precision,
-		         $5::double precision,
-		         $6::double precision,
-		         $7::boolean,
-		         $8::text)
-		ORDER BY combined_score DESC LIMIT $9`
+	query := buildHybridSearchQuery(embeddingDim)
 
 	rows, err := p.Query(ctx, query,
 		queryText, VecLiteral(embedding), topK*2,
