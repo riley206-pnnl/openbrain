@@ -26,13 +26,11 @@
 #   the self-hosted fleet per the standard DevOps rule.
 #
 # WHY THE "Unit tests" JOB NO LONGER USES A CONTAINER
-#   The self-hosted version ran inside the golang:1.25 container purely to get a
-#   C compiler for `go test -race` (the fleet runs CGO_ENABLED=0 with no host
+#   The self-hosted version ran inside a golang container purely to get a C
+#   compiler for `go test -race` (the fleet runs CGO_ENABLED=0 with no host
 #   gcc). ubuntu-latest ships gcc / build-essential and enables cgo by default,
 #   so `-race` works NATIVELY on the host with no container. We provision Go via
-#   actions/setup-go pinned to go1.25.10 — the CVE-clean patch matching
-#   openbrain's go.mod `go 1.25.0` minor line (1.25.10 clears the net / net/http
-#   stdlib CVEs GO-2026-4971, GO-2026-4918 that older 1.25.x toolchains flag).
+#   actions/setup-go pinned to go1.26.4 — matching openbrain's go.mod version.
 #   No container, no go-version assertion step, no cgo-confirm step — setup-go
 #   gives us the exact pinned toolchain and the runner already has cgo + gcc.
 #
@@ -100,14 +98,14 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
 
-      # Provision the exact pinned toolchain: go1.25.10 (the CVE-clean patch on
-      # openbrain's go.mod `go 1.25.0` minor line). cache:false keeps the job
-      # self-contained and avoids cross-run cache state. ubuntu-latest already
-      # has gcc/build-essential, so cgo is enabled by default for `-race`.
-      - name: Set up Go (pinned 1.25.10)
+      # Provision the exact pinned toolchain: go1.26.4 (matching go.mod).
+      # cache:false keeps the job self-contained and avoids cross-run cache
+      # state. ubuntu-latest already has gcc/build-essential, so cgo is
+      # enabled by default for `-race`.
+      - name: Set up Go (pinned 1.26.4)
         uses: actions/setup-go@v6
         with:
-          go-version: '1.25.10'
+          go-version: '1.26.4'
           cache: false
 
       - name: Verify module
