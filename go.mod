@@ -1,6 +1,6 @@
 module github.com/windingriverholdings/openbrain
 
-go 1.25.0
+go 1.26.4
 
 require (
 	github.com/caarlos0/env/v11 v11.3.1

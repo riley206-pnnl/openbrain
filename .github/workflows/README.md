@@ -24,12 +24,11 @@ DevOps rule, **scoped to PUBLIC repos**:
 
 ### Consequences of the carve-out
 
-- **`test.yml`** runs the `Unit tests` job **directly on the host** (no
-  `golang:1.25` container). ubuntu-latest ships gcc / build-essential, so cgo is on
-  by default and `go test -race` works natively. The Go toolchain is pinned via
-  `actions/setup-go@v6` to **`1.25.10`** — the CVE-clean patch on go.mod's `1.25`
-  line (clears stdlib CVEs GO-2026-4971 / GO-2026-4918).
-- **`cve-gate.yml`** pins Go to the same `1.25.10` via `setup-go`. The ephemeral
+- **`test.yml`** runs the `Unit tests` job **directly on the host** (no container).
+  ubuntu-latest ships gcc / build-essential, so cgo is on by default and
+  `go test -race` works natively. The Go toolchain is pinned via
+  `actions/setup-go@v6` to **`1.26.4`** — matching go.mod's `go 1.26.4` line.
+- **`cve-gate.yml`** pins Go to the same `1.26.4` via `setup-go`. The ephemeral
   pinned + checksum-verified `jq` provisioning step is **kept** even though
   ubuntu-latest ships jq — it pins an audited jq and keeps the gate copy-pasteable
   with openknowledge's.
