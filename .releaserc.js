@@ -8,12 +8,12 @@
 // bump commit is made.
 //
 // Plugin order:
-//   1. commitAnalyzer   -- compute bump type from conventional commits
-//   2. releaseNotes     -- generate changelog entry
-//   3. changelog        -- write CHANGELOG.md
-//   4. exec             -- rewrite var Version in internal/version/version.go
-//   5. git              -- commit the rewritten version file and CHANGELOG.md
-//   6. github           -- create the tag and GitHub release
+//   1. commitAnalyzer: compute bump type from conventional commits
+//   2. releaseNotes:   generate changelog entry
+//   3. changelog:      write CHANGELOG.md
+//   4. exec:           rewrite var Version in internal/version/version.go
+//   5. git:            commit the rewritten version file and CHANGELOG.md
+//   6. github:         create the tag and GitHub release
 //
 // The @semantic-release/exec prepareCmd:
 //   a. grep-count guard: fails loudly if the var line is not found exactly

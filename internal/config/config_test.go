@@ -252,7 +252,7 @@ func TestWebWSToken_AcceptsLongToken(t *testing.T) {
 // In local dev builds that var is "dev"; in release builds @semantic-release/exec
 // rewrites it to the computed semver (e.g. "0.3.0").
 func TestMCPServerVersion_DefaultsToVersionVar(t *testing.T) {
-	// Do not set OPENBRAIN_MCP_SERVER_VERSION — we want the default path.
+	// Do not set OPENBRAIN_MCP_SERVER_VERSION: we want the default path.
 	t.Setenv("OPENBRAIN_MCP_SERVER_VERSION", "")
 	cfg, err := Load()
 	assert.NoError(t, err)

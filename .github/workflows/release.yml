@@ -23,7 +23,7 @@
 #   release.yml is write CI (tag creation, forge release). Use self-hosted.
 #
 # CONCURRENCY:
-#   cancel-in-progress: false — if an operator accidentally dispatches twice,
+#   cancel-in-progress: false: if an operator accidentally dispatches twice,
 #   the second run queues rather than cancelling the first mid-flight. A
 #   cancelled mid-flight release is harder to recover from than a queued one.
 #
@@ -177,18 +177,17 @@ jobs:
           echo "OK: release tag '${TAG}' confirmed on remote."
 
       - name: Assert var Version was rewritten (post-release)
-        # Fires only on a real release. Re-reads internal/version/version.go
-        # and confirms the var line now contains the new semver, not "dev".
-        # A "dev" value after a release means the exec prepareCmd silently
-        # failed or the git plugin did not commit the file.
+        # Fires only on a real release. Reads internal/version/version.go from
+        # the LOCAL working tree, which @semantic-release/exec already rewrote
+        # and @semantic-release/git already committed during the Release step.
+        # No network fetch needed: the file on disk is the authoritative state.
+        # A "dev" value here means the exec prepareCmd failed silently or the
+        # git plugin did not stage the file before committing.
         if: steps.release.outputs.new_release_published == 'true'
         env:
           TAG_VERSION: ${{ steps.release.outputs.new_release_version }}
         run: |
           VERSION_FILE="internal/version/version.go"
-          # After the bump commit, pull the updated file from the remote.
-          git fetch origin main
-          git checkout origin/main -- "${VERSION_FILE}"
           WRITTEN=$(grep 'var Version = ' "${VERSION_FILE}" | sed 's/.*var Version = "\(.*\)".*/\1/')
           if [ "${WRITTEN}" = "dev" ] || [ -z "${WRITTEN}" ]; then
             echo "ERROR: ${VERSION_FILE} still contains Version='${WRITTEN}' after release." >&2
