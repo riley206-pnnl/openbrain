@@ -27,5 +27,8 @@ bin/
 openbrain-mcp
 coverage.out
 
+# Node (release tooling)
+node_modules/
+
 # Claude
 .claude/
