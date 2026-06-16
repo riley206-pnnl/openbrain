@@ -1,0 +1,11 @@
+{
+  "name": "openbrain-release",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Release tooling for openbrain. Not a publishable package.",
+  "devDependencies": {
+    "@wrsoftware/semantic-release-config": "github:windingriverholdings/semantic-release-config#v0.2.0",
+    "@semantic-release/exec": "^6.0.3",
+    "semantic-release": "^25.0.0"
+  }
+}
