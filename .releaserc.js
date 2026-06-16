@@ -8,12 +8,12 @@
 // bump commit is made.
 //
 // Plugin order:
-//   1. commitAnalyzer   — compute bump type from conventional commits
-//   2. releaseNotes     — generate changelog entry
-//   3. changelog        — write CHANGELOG.md
-//   4. exec             — rewrite var Version in internal/version/version.go
-//   5. git              — commit the rewritten version file and CHANGELOG.md
-//   6. github           — create the tag and GitHub release
+//   1. commitAnalyzer   -- compute bump type from conventional commits
+//   2. releaseNotes     -- generate changelog entry
+//   3. changelog        -- write CHANGELOG.md
+//   4. exec             -- rewrite var Version in internal/version/version.go
+//   5. git              -- commit the rewritten version file and CHANGELOG.md
+//   6. github           -- create the tag and GitHub release
 //
 // The @semantic-release/exec prepareCmd:
 //   a. grep-count guard: fails loudly if the var line is not found exactly
@@ -26,6 +26,11 @@
 //   index. Named references are stable across chain reorders; positional
 //   indices break silently when the shared config grows or reorders.
 //
+//   base.namedPlugins.git is the tuple ['@semantic-release/git', { assets, message }].
+//   To override the assets list, we destructure the tuple and spread the base
+//   options, then add VERSION_FILE to assets. This keeps the base commit
+//   message template intact and avoids duplicating it here.
+//
 // Maintenance: if the shared config adds a new named plugin, add the
 // corresponding destructure here. Divergence from the shared plugin chain
 // is a review finding.
@@ -36,13 +41,19 @@ const base = require('@wrsoftware/semantic-release-config')
 const { commitAnalyzer, releaseNotes, changelog, git, github } = base.namedPlugins
 
 // VERSION_FILE is the path (relative to repo root) containing the canonical
-// var Version line. Update this constant if the file is ever moved.
+// var Version line. Update this constant if the file is ever moved, and
+// update the corresponding version_file in projects/openbrain/project.yml.
 const VERSION_FILE = 'internal/version/version.go'
 
-// VERSION_PATTERN is the exact sed address. It must match the line verbatim
-// (modulo the version string itself) so the grep-count guard and the sed
-// substitution target the same line.
+// VERSION_PATTERN is the exact string that identifies the var line.
+// It must match the line verbatim (modulo the version string itself) so the
+// grep-count guard and the sed substitution target the same line.
 const VERSION_PATTERN = 'var Version = '
+
+// gitPluginName and gitPluginOpts: destructure the base git tuple so we can
+// extend the assets list without re-stating the commit message template.
+// git is ['@semantic-release/git', { assets: ['CHANGELOG.md'], message: '...' }]
+const [gitPluginName, gitPluginOpts] = git
 
 module.exports = {
   extends: '@wrsoftware/semantic-release-config',
@@ -66,8 +77,12 @@ module.exports = {
         `sed -i 's|${VERSION_PATTERN}"[^"]*"|${VERSION_PATTERN}"\${nextRelease.version}"|' ${VERSION_FILE}`
     }],
     // step 5: commit CHANGELOG.md and the rewritten version file.
-    // assets lists exactly the files changed by the exec step and changelog step.
-    [git, { assets: [VERSION_FILE, 'CHANGELOG.md'] }],
+    // Extends the base git plugin options: keeps the shared commit message
+    // template and adds VERSION_FILE to the assets list.
+    [gitPluginName, {
+      ...gitPluginOpts,
+      assets: [...gitPluginOpts.assets, VERSION_FILE]
+    }],
     github            // step 6: create the tag and GitHub release
   ]
 }
