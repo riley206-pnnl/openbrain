@@ -11,6 +11,8 @@ import (
 
 	"github.com/caarlos0/env/v11"
 	"github.com/joho/godotenv"
+
+	"github.com/windingriverholdings/openbrain/internal/version"
 )
 
 // tesseractLangsPattern validates TesseractLangs as one or more 3-letter
@@ -47,7 +49,13 @@ type Config struct {
 
 	// MCP
 	MCPServerName    string `env:"OPENBRAIN_MCP_SERVER_NAME" envDefault:"openbrain"`
-	MCPServerVersion string `env:"OPENBRAIN_MCP_SERVER_VERSION" envDefault:"0.2.0"`
+	// MCPServerVersion defaults to version.Version (the value of the canonical
+	// var in internal/version/version.go) when OPENBRAIN_MCP_SERVER_VERSION is
+	// not set in the environment. This allows @semantic-release/exec to rewrite
+	// the var at release time and have all binaries pick it up automatically.
+	// The env var override is preserved for environments that pin a version
+	// externally (e.g. k8s ConfigMap, systemd EnvironmentFile).
+	MCPServerVersion string `env:"OPENBRAIN_MCP_SERVER_VERSION"`
 	MCPHTTPEnabled   bool   `env:"OPENBRAIN_MCP_HTTP_ENABLED" envDefault:"false"`
 	MCPAuthToken     string `env:"OPENBRAIN_MCP_AUTH_TOKEN"`
 
@@ -203,6 +211,14 @@ func Load() (*Config, error) {
 	c := &Config{}
 	if err := env.Parse(c); err != nil {
 		return nil, fmt.Errorf("parse config: %w", err)
+	}
+	// Apply the canonical version default when the env var is not set.
+	// version.Version holds "dev" in local builds and the semver string
+	// (e.g. "0.3.0") in release builds after @semantic-release/exec rewrites
+	// internal/version/version.go. The env var OPENBRAIN_MCP_SERVER_VERSION
+	// takes precedence when set, allowing external pinning without code changes.
+	if c.MCPServerVersion == "" {
+		c.MCPServerVersion = version.Version
 	}
 	if c.TesseractLangs != "" && !tesseractLangsPattern.MatchString(c.TesseractLangs) {
 		return nil, fmt.Errorf("invalid OPENBRAIN_TESSERACT_LANGS %q: must match pattern lang(+lang)* where lang is 3 lowercase letters", c.TesseractLangs)

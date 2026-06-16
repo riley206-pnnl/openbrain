@@ -4,6 +4,8 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+
+	"github.com/windingriverholdings/openbrain/internal/version"
 )
 
 func TestDefaultSearchScoreThreshold(t *testing.T) {
@@ -242,6 +244,30 @@ func TestWebWSToken_AcceptsLongToken(t *testing.T) {
 	cfg, err := Load()
 	assert.NoError(t, err)
 	assert.Equal(t, token, cfg.WebWSToken)
+}
+
+// TestMCPServerVersion_DefaultsToVersionVar confirms that when
+// OPENBRAIN_MCP_SERVER_VERSION is not set in the environment, MCPServerVersion
+// falls back to version.Version (the canonical var in internal/version/version.go).
+// In local dev builds that var is "dev"; in release builds @semantic-release/exec
+// rewrites it to the computed semver (e.g. "0.3.0").
+func TestMCPServerVersion_DefaultsToVersionVar(t *testing.T) {
+	// Do not set OPENBRAIN_MCP_SERVER_VERSION — we want the default path.
+	t.Setenv("OPENBRAIN_MCP_SERVER_VERSION", "")
+	cfg, err := Load()
+	assert.NoError(t, err)
+	assert.Equal(t, version.Version, cfg.MCPServerVersion,
+		"MCPServerVersion must equal version.Version when env var is absent")
+}
+
+// TestMCPServerVersion_EnvOverridesVersionVar confirms the env var
+// OPENBRAIN_MCP_SERVER_VERSION takes precedence over version.Version.
+func TestMCPServerVersion_EnvOverridesVersionVar(t *testing.T) {
+	t.Setenv("OPENBRAIN_MCP_SERVER_VERSION", "9.9.9")
+	cfg, err := Load()
+	assert.NoError(t, err)
+	assert.Equal(t, "9.9.9", cfg.MCPServerVersion,
+		"OPENBRAIN_MCP_SERVER_VERSION env var must override version.Version")
 }
 
 func TestTesseractLangsValidation_AcceptsValid(t *testing.T) {
