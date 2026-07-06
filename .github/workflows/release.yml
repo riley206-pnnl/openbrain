@@ -182,20 +182,31 @@ jobs:
             npx semantic-release 2>&1 | tee "${LOG}"
           fi
           # semantic-release core logs "Published release <version> on <channel>
-          # channel" ONLY when a real release is created (never in dry-run and
-          # never when there are no releasable commits). Parse that line as the
-          # authoritative published signal. Strip ANSI color codes first so a
-          # colored CI log still matches.
+          # channel" even in --dry-run: in semantic-release 25.0.5 that
+          # logger.success call sits AFTER the dry-run branch, so dry-run skips
+          # only the tag and push, not the log line. The log match alone is
+          # therefore NOT a real-publish signal. The published detection must
+          # also gate on DRY_RUN != "true": a dry-run never creates a tag, so it
+          # must always take the harmless no-assert path or the tag-exists assert
+          # below would hard-fail every smoke check that has a pending commit.
+          # Strip ANSI color codes first so a colored CI log still matches. The
+          # extraction reads the completed tee'd LOG file (no live pipe), so
+          # tail -n1 is not about SIGPIPE: it just takes the last match if the
+          # line appeared more than once.
           VERSION="$(sed -e 's/\x1b\[[0-9;]*m//g' "${LOG}" \
             | sed -n 's/.*Published release \([0-9][0-9A-Za-z.+-]*\).*/\1/p' \
             | tail -n1)"
-          if [ -n "${VERSION}" ]; then
+          if [ "${DRY_RUN}" != "true" ] && [ -n "${VERSION}" ]; then
             echo "new_release_published=true" >> "${GITHUB_OUTPUT}"
             echo "new_release_version=${VERSION}" >> "${GITHUB_OUTPUT}"
             echo "Detected published release version: ${VERSION}"
           else
             echo "new_release_published=false" >> "${GITHUB_OUTPUT}"
-            echo "No 'Published release' line found: no tag was created this run."
+            if [ "${DRY_RUN}" = "true" ]; then
+              echo "Dry-run: no tag created, skipping the post-release tag assert."
+            else
+              echo "No 'Published release' line found: no tag was created this run."
+            fi
           fi
           rm -f "${LOG}"
 
