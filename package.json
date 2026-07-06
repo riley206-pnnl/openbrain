@@ -4,6 +4,7 @@
   "private": true,
   "description": "Release tooling for openbrain. Not a publishable package.",
   "devDependencies": {
+    "@semantic-release/exec": "7.1.0",
     "@wrsoftware/semantic-release-config": "github:windingriverholdings/semantic-release-config#v0.2.0",
     "semantic-release": "~25.0.5"
   }

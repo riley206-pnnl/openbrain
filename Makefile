@@ -12,9 +12,15 @@ BUILD_TAGS ?=
 # "dev" sentinel baked into internal/version/version.go.
 VERSION_PKG := github.com/windingriverholdings/openbrain/internal/version
 VERSION     := $(shell git describe --tags --always 2>/dev/null || echo dev)
-LDFLAGS     := -X $(VERSION_PKG).Version=$(VERSION)
 
-.PHONY: all build build-ocr test test-cover test-verbose lint vet clean install fixtures setup-db
+# go_ldflags: the linker version stamp for a given version string. Single
+# source of truth for every build target (build, install, dist), so a future
+# second -X flag (commit SHA, build date) is added here once and inherited
+# everywhere instead of drifting between targets.
+go_ldflags = -X $(VERSION_PKG).Version=$(1)
+LDFLAGS    := $(call go_ldflags,$(VERSION))
+
+.PHONY: all build build-ocr dist test test-cover test-verbose lint vet clean install fixtures setup-db
 
 ## Default: show help
 all: help
@@ -28,6 +34,41 @@ $(BINDIR)/%: cmd/%/*.go internal/**/*.go go.mod go.sum
 ## Build all binaries with OCR support (requires tesseract-ocr + libtesseract-dev)
 build-ocr:
 	$(MAKE) build BUILD_TAGS=ocr
+
+# ---------------------------------------------------------------------------
+# Release assets (OB-043).
+#
+# `make dist DIST_VERSION=vX.Y.Z` builds the six binaries as versioned,
+# platform-suffixed release assets into dist/ and writes dist/SHA256SUMS over
+# them. It is invoked by @semantic-release/exec's prepareCmd at release time
+# with the computed version (v${nextRelease.version}), so the assets carry the
+# ACTUAL release version, not the git-describe value `make build` uses.
+#
+# DIST_VERSION is REQUIRED and has no default: a dist build with no explicit
+# version is a mistake (it would ship an unversioned or "dev" asset). This
+# target only BUILDS: it runs no git add/commit/push and rewrites no source.
+#
+# linux/amd64 only for now (the bigmon deploy target and the ubuntu-latest
+# runner native arch). A cross-platform matrix is a trivial follow-up.
+DISTDIR       := dist
+DIST_PLATFORM := linux-amd64
+DIST_VERSION  ?=
+
+## Build the six binaries as versioned linux/amd64 release assets + SHA256SUMS
+dist:
+	@if [ -z "$(DIST_VERSION)" ]; then \
+		echo "ERROR: DIST_VERSION is required, e.g. make dist DIST_VERSION=v0.3.1" >&2; \
+		exit 1; \
+	fi
+	rm -rf $(DISTDIR)
+	@mkdir -p $(DISTDIR)
+	@for cmd in $(CMDS); do \
+		out="$(DISTDIR)/$$cmd-$(DIST_VERSION)-$(DIST_PLATFORM)"; \
+		echo "building $$out (version $(DIST_VERSION))"; \
+		GOOS=linux GOARCH=amd64 $(GO) build -ldflags "$(call go_ldflags,$(DIST_VERSION))" -o "$$out" ./cmd/$$cmd || exit 1; \
+	done
+	cd $(DISTDIR) && sha256sum openbrain*-$(DIST_VERSION)-$(DIST_PLATFORM) > SHA256SUMS
+	@echo "wrote $(DISTDIR)/SHA256SUMS"
 
 ## Run all unit tests
 test:
@@ -68,7 +109,7 @@ install:
 
 ## Remove build artifacts
 clean:
-	rm -rf $(BINDIR) coverage.out
+	rm -rf $(BINDIR) $(DISTDIR) coverage.out
 
 ## Show binary sizes
 sizes: build
@@ -86,6 +127,7 @@ help:
 	@echo ""
 	@echo "  make build         Build all 6 binaries"
 	@echo "  make build-ocr     Build with OCR support (needs tesseract)"
+	@echo "  make dist          Build versioned release assets (needs DIST_VERSION)"
 	@echo "  make test          Run unit tests"
 	@echo "  make test-verbose  Run tests with verbose output"
 	@echo "  make test-cover    Run tests with coverage report"

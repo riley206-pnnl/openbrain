@@ -160,6 +160,40 @@ jobs:
           fi
           echo "OK: canary reported '${REPORTED}'. The ldflags symbol path is wired correctly."
 
+      - name: Dist release-asset build smoke-test (releasing.md section 4, OB-043)
+        # The real asset build runs in semantic-release's PREPARE step, which
+        # semantic-release SKIPS on --dry-run (prepare is defined dryRun:false in
+        # semantic-release/lib/definitions/plugins.js). So the default
+        # dry_run=true smoke check never exercises `make dist`: the six
+        # cross-compiles and the sha256sum step would first run only on a real
+        # release, where a failure aborts AFTER the version is computed. This
+        # ALWAYS-RUN step (not gated on dry_run, like the ldflags canary above)
+        # exercises the exact dist build with a synthetic version, asserts the
+        # six binaries AND SHA256SUMS were produced, then removes dist/ so this
+        # smoke build does not pollute the real prepare build that runs later.
+        run: |
+          set -euo pipefail
+          SMOKE_VERSION="v0.0.0-dist-smoke-test"
+          make dist DIST_VERSION="${SMOKE_VERSION}"
+          MISSING=0
+          for cmd in openbrain openbrain-mcp openbrain-web openbrain-telegram openbrain-slack openbrain-watchd; do
+            ASSET="dist/${cmd}-${SMOKE_VERSION}-linux-amd64"
+            if [ ! -f "${ASSET}" ]; then
+              echo "ERROR: expected dist asset '${ASSET}' was not produced." >&2
+              MISSING=1
+            fi
+          done
+          if [ ! -f dist/SHA256SUMS ]; then
+            echo "ERROR: dist/SHA256SUMS was not produced." >&2
+            MISSING=1
+          fi
+          rm -rf dist
+          if [ "${MISSING}" -ne 0 ]; then
+            echo "make dist did not produce the full asset set. Aborting before release." >&2
+            exit 1
+          fi
+          echo "OK: make dist produced the six binaries and SHA256SUMS."
+
       # id: release lets the later steps address this step's outputs. It does
       # NOT create those outputs: the step body below writes
       # new_release_published and new_release_version to $GITHUB_OUTPUT itself
@@ -239,3 +273,42 @@ jobs:
             exit 1
           fi
           echo "OK: release tag '${TAG}' confirmed on remote."
+
+      - name: Assert release assets attached (post-release, section 5, OB-043)
+        # @semantic-release/github@12.0.8 publish() SWALLOWS a missing or
+        # unreadable asset: on a failed stat it logs "The asset %s cannot be
+        # read, and will be ignored" and returns WITHOUT rejecting Promise.all,
+        # so the release can finalize with FEWER assets than intended. The
+        # tag-exists assert above never sees this. This step confirms the
+        # release carries EXACTLY the seven expected assets (the six binaries +
+        # SHA256SUMS), failing loud on any count or name mismatch. It extends the
+        # section-5 "did the release do the right thing" guarantee to the assets
+        # this workflow exists to ship. TAG_VERSION is passed via env; gh reads
+        # GITHUB_TOKEN from the environment.
+        if: steps.release.outputs.new_release_published == 'true'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG_VERSION: ${{ steps.release.outputs.new_release_version }}
+        run: |
+          set -euo pipefail
+          TAG="v${TAG_VERSION}"
+          EXPECTED_SORTED="$(printf '%s\n' \
+            "openbrain-${TAG}-linux-amd64" \
+            "openbrain-mcp-${TAG}-linux-amd64" \
+            "openbrain-web-${TAG}-linux-amd64" \
+            "openbrain-telegram-${TAG}-linux-amd64" \
+            "openbrain-slack-${TAG}-linux-amd64" \
+            "openbrain-watchd-${TAG}-linux-amd64" \
+            "SHA256SUMS" | sort)"
+          ACTUAL_SORTED="$(gh release view "${TAG}" --json assets --jq '.assets[].name' | sort)"
+          ACTUAL_COUNT="$(printf '%s\n' "${ACTUAL_SORTED}" | grep -c . || true)"
+          if [ "${ACTUAL_COUNT}" -ne 7 ] || [ "${ACTUAL_SORTED}" != "${EXPECTED_SORTED}" ]; then
+            echo "ERROR: release ${TAG} assets do not match the expected seven." >&2
+            echo "Expected:" >&2
+            printf '%s\n' "${EXPECTED_SORTED}" >&2
+            echo "Actual (count ${ACTUAL_COUNT}):" >&2
+            printf '%s\n' "${ACTUAL_SORTED}" >&2
+            echo "@semantic-release/github may have silently ignored an unreadable asset." >&2
+            exit 1
+          fi
+          echo "OK: release ${TAG} carries all seven expected assets."
