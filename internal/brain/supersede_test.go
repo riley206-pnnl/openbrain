@@ -32,6 +32,29 @@ func (staticEmbedder) EmbedBatch(ctx context.Context, texts []string) ([][]float
 
 func (staticEmbedder) Dimension() int { return 3 }
 
+// erroringEmbedder returns an error when embedding a specific text, so the
+// embed-failure branches of Supersede are testable.
+type erroringEmbedder struct {
+	failOn string
+}
+
+func (e erroringEmbedder) Embed(ctx context.Context, text string) ([]float32, error) {
+	if text == e.failOn {
+		return nil, errors.New("embed failed for " + text)
+	}
+	return []float32{0.1, 0.2, 0.3}, nil
+}
+
+func (e erroringEmbedder) EmbedBatch(ctx context.Context, texts []string) ([][]float32, error) {
+	out := make([][]float32, len(texts))
+	for i := range texts {
+		out[i] = []float32{0.1, 0.2, 0.3}
+	}
+	return out, nil
+}
+
+func (erroringEmbedder) Dimension() int { return 3 }
+
 // fakeThought models a single row of the temporal-fact table: a thought that
 // is either current (live) or retired (superseded_by set, is_current false).
 type fakeThought struct {
@@ -236,4 +259,48 @@ func TestSupersede_ConcurrentSameTarget(t *testing.T) {
 	assert.Equal(t, 1, alreadySuperseded, "the loser observes the already-superseded state")
 	assert.Equal(t, 1, store.liveCount(), "live count must stay 1 under concurrent supersede")
 	assert.Equal(t, 2, len(store.thoughts), "only the old thought plus one new thought exist, no duplicate")
+}
+
+// TestSupersede_EmbedContentFailure asserts the new-thought embed failure
+// surfaces as an error before any capture is attempted.
+func TestSupersede_EmbedContentFailure(t *testing.T) {
+	oldID := "abcdef01-old"
+	b := &Brain{embedder: erroringEmbedder{failOn: "bad content"}}
+	b.supersedeFn = func(context.Context, db.SupersedeParams) (string, error) {
+		t.Fatal("supersedeFn must not run when the content embed fails")
+		return "", nil
+	}
+
+	parsed := intent.ParsedIntent{
+		Intent:       intent.Supersede,
+		Text:         "bad content",
+		ThoughtType:  "insight",
+		OldThoughtID: &oldID,
+	}
+	msg, err := b.Supersede(context.Background(), parsed, "test")
+	require.Error(t, err)
+	assert.Empty(t, msg)
+	assert.Contains(t, err.Error(), "embed supersede")
+}
+
+// TestSupersede_EmbedQueryFailure asserts the supersede-query embed failure in
+// the search path surfaces as an error, not a success string.
+func TestSupersede_EmbedQueryFailure(t *testing.T) {
+	query := "find the thought"
+	b := &Brain{embedder: erroringEmbedder{failOn: query}}
+	b.supersedeFn = func(context.Context, db.SupersedeParams) (string, error) {
+		t.Fatal("supersedeFn must not run when the query embed fails")
+		return "", nil
+	}
+
+	parsed := intent.ParsedIntent{
+		Intent:         intent.Supersede,
+		Text:           "new content",
+		ThoughtType:    "insight",
+		SupersedeQuery: &query,
+	}
+	msg, err := b.Supersede(context.Background(), parsed, "test")
+	require.Error(t, err)
+	assert.Empty(t, msg)
+	assert.Contains(t, err.Error(), "embed supersede query")
 }

@@ -31,6 +31,11 @@ type Brain struct {
 	// testable without a live LLM or database.
 	extractFn func(ctx context.Context, text string) ([]extract.Candidate, error)
 	captureFn func(ctx context.Context, parsed intent.ParsedIntent, source string) (string, error)
+
+	// supersedeFn is a seam over the atomic capture-and-retire transaction,
+	// defaulted in New to db.SupersedeCapture. It exists so the atomicity and
+	// concurrency contract of Supersede is testable without a live database.
+	supersedeFn func(ctx context.Context, params db.SupersedeParams) (string, error)
 }
 
 // New creates a Brain with the given dependencies.
@@ -38,6 +43,9 @@ func New(pool *pgxpool.Pool, embedder embeddings.Embedder, cfg *config.Config) *
 	b := &Brain{pool: pool, embedder: embedder, cfg: cfg}
 	b.extractFn = extract.ExtractThoughts
 	b.captureFn = b.Capture
+	b.supersedeFn = func(ctx context.Context, params db.SupersedeParams) (string, error) {
+		return db.SupersedeCapture(ctx, b.pool, params)
+	}
 	return b
 }
 
@@ -146,56 +154,76 @@ func (b *Brain) GetReview(ctx context.Context, days int) ([]model.ThoughtRow, er
 	return db.GetThoughtsSince(ctx, b.pool, days)
 }
 
-// Supersede captures a new thought and marks an older thought as superseded.
-// If parsed.OldThoughtID is set, that thought is superseded directly (no search).
-// If parsed.SupersedeQuery is set, it is embedded to find the best match instead
-// of using the new thought's own embedding.
+// Supersede captures a new thought and marks an older thought as superseded in
+// one atomic transaction: either both writes commit or both roll back, so no
+// orphan capture is ever left behind. On any failure it returns a real, typed
+// error to the caller rather than a success-shaped confirmation string.
+//
+// If parsed.OldThoughtID is set, that thought is superseded directly (no
+// search). Otherwise parsed.SupersedeQuery (or the new content) is embedded to
+// find the best prior match; when there is no match the new thought is captured
+// normally.
 func (b *Brain) Supersede(ctx context.Context, parsed intent.ParsedIntent, source string) (string, error) {
 	embedding, err := b.embedder.Embed(ctx, parsed.Text)
 	if err != nil {
 		return "", fmt.Errorf("embed supersede: %w", err)
 	}
 
-	newID, err := db.InsertThought(ctx, b.pool, parsed.Text, embedding, parsed.ThoughtType, parsed.Tags, source, nil, nil)
+	oldID, err := b.resolveSupersedeTarget(ctx, parsed, embedding)
 	if err != nil {
 		return "", err
 	}
-
-	// Direct supersede: caller provided the exact old thought ID.
-	if parsed.OldThoughtID != nil {
-		oldID := *parsed.OldThoughtID
-		if err := db.SupersedeThought(ctx, b.pool, oldID, newID); err != nil {
-			slog.Warn("supersede failed", "error", err)
-			return fmt.Sprintf("Captured [%s] %s (supersede failed)", parsed.ThoughtType, newID[:8]), nil
-		}
-		return fmt.Sprintf("Captured [%s] %s — supersedes %s", parsed.ThoughtType, newID[:8], oldID[:8]), nil
+	// No prior thought to supersede: capture the new thought normally.
+	if oldID == "" {
+		return b.Capture(ctx, parsed, source)
 	}
 
-	// Search-based supersede: embed the query (or new content) to find the best match.
+	params := db.SupersedeParams{
+		Content:     parsed.Text,
+		Embedding:   embedding,
+		ThoughtType: parsed.ThoughtType,
+		Tags:        parsed.Tags,
+		Source:      source,
+		OldID:       oldID,
+	}
+	newID, err := b.supersedeFn(ctx, params)
+	if err != nil {
+		slog.Error("supersede failed",
+			"old_thought_id", oldID,
+			"error", err)
+		return "", fmt.Errorf("supersede thought %s: %w", db.ShortID(oldID), err)
+	}
+
+	slog.Info("thought superseded", "old", db.ShortID(oldID), "new", db.ShortID(newID))
+	return fmt.Sprintf("Captured [%s] %s, supersedes %s",
+		parsed.ThoughtType, db.ShortID(newID), db.ShortID(oldID)), nil
+}
+
+// resolveSupersedeTarget returns the id of the thought to retire. It returns an
+// empty string (and nil error) when a search-based supersede finds no match,
+// signaling the caller to capture the new thought normally.
+func (b *Brain) resolveSupersedeTarget(ctx context.Context, parsed intent.ParsedIntent, embedding []float32) (string, error) {
+	if parsed.OldThoughtID != nil {
+		return *parsed.OldThoughtID, nil
+	}
+
 	searchEmbedding := embedding
 	if parsed.SupersedeQuery != nil {
+		var err error
 		searchEmbedding, err = b.embedder.Embed(ctx, *parsed.SupersedeQuery)
 		if err != nil {
-			return fmt.Sprintf("Captured [%s] %s (embed query failed)", parsed.ThoughtType, newID[:8]), nil
+			return "", fmt.Errorf("embed supersede query: %w", err)
 		}
 	}
 
 	results, err := db.SearchThoughts(ctx, b.pool, searchEmbedding, 1, "", nil, 0.3)
-	if err != nil || len(results) == 0 {
-		return fmt.Sprintf("Captured [%s] %s (no match to supersede)", parsed.ThoughtType, newID[:8]), nil
+	if err != nil {
+		return "", fmt.Errorf("supersede search: %w", err)
 	}
-
-	oldID := results[0].ID
-	if oldID == newID {
-		return fmt.Sprintf("Captured [%s] %s (no prior match)", parsed.ThoughtType, newID[:8]), nil
+	if len(results) == 0 {
+		return "", nil
 	}
-
-	if err := db.SupersedeThought(ctx, b.pool, oldID, newID); err != nil {
-		slog.Warn("supersede failed", "error", err)
-		return fmt.Sprintf("Captured [%s] %s (supersede failed)", parsed.ThoughtType, newID[:8]), nil
-	}
-
-	return fmt.Sprintf("Captured [%s] %s — supersedes %s", parsed.ThoughtType, newID[:8], oldID[:8]), nil
+	return results[0].ID, nil
 }
 
 // DeepCapture extracts multiple thoughts from long text via LLM.

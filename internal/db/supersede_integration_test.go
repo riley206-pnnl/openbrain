@@ -139,6 +139,46 @@ func TestSupersedeCapture_AlreadySupersededRollsBack(t *testing.T) {
 	assert.Equal(t, before, liveCountBySource(t, pool, source), "live count unchanged after failed supersede")
 }
 
+// TestSupersedeCapture_RejectsEmptyEmbedding asserts the empty-embedding guard
+// fires before any database work, so it needs no live database.
+func TestSupersedeCapture_RejectsEmptyEmbedding(t *testing.T) {
+	_, err := SupersedeCapture(context.Background(), nil, SupersedeParams{
+		Content: "x", Embedding: nil, ThoughtType: "insight", Source: "unit", OldID: "irrelevant",
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "empty embedding")
+}
+
+// TestSupersedeCapture_OldThoughtNotFound asserts an unknown old_thought_id
+// yields the typed ErrOldThoughtNotFound and captures nothing.
+func TestSupersedeCapture_OldThoughtNotFound(t *testing.T) {
+	pool := integrationPool(t)
+	ctx := context.Background()
+	source := "ob031-not-found"
+	cleanupSource(t, pool, source)
+	t.Cleanup(func() { cleanupSource(t, pool, source) })
+
+	_, err := SupersedeCapture(ctx, pool, SupersedeParams{
+		Content: "orphan that must not survive", Embedding: testEmbedding,
+		ThoughtType: "insight", Source: source,
+		OldID: "00000000-0000-0000-0000-000000000000",
+	})
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, ErrOldThoughtNotFound), "expected ErrOldThoughtNotFound, got %v", err)
+
+	var total int
+	require.NoError(t, pool.QueryRow(ctx,
+		`SELECT count(*) FROM thoughts WHERE source = $1`, source).Scan(&total))
+	assert.Equal(t, 0, total, "no thought may be captured when the old thought is absent")
+}
+
+// TestShortID covers the short-string branch that never panics.
+func TestShortID(t *testing.T) {
+	assert.Equal(t, "abc", ShortID("abc"))
+	assert.Equal(t, "0123456", ShortID("0123456"))
+	assert.Equal(t, "01234567", ShortID("0123456789"))
+}
+
 // TestSupersedeCapture_ConcurrentSameTarget asserts row-level locking prevents
 // two concurrent supersedes of the same old thought from both capturing. The
 // live count stays 1.
