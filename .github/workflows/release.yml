@@ -1,4 +1,4 @@
-# Release workflow for openbrain (WD-012).
+# Release workflow for openbrain (WD-012, OB-040).
 #
 # TRIGGER MODEL: deliberate dispatch only.
 #   Releases are cut by running this workflow manually:
@@ -15,13 +15,26 @@
 #   There is NO push-to-main auto-trigger. Merging a PR to main does NOT
 #   cut a release. Craig decides when to release; Kit dispatches the workflow.
 #
+# NO PUSH TO refs/heads/main (releasing.md sections 3, 4, 5):
+#   The main branch is protected (ruleset 16819112: changes must go through a
+#   pull request). semantic-release therefore does NOT rewrite a source version
+#   constant and does NOT push a bump commit to main. Its only outputs are the
+#   git tag (refs/tags/*, not protected) and the GitHub release, both created
+#   by @semantic-release/github. See .releaserc.js for the trimmed plugin chain.
+#
+#   The version is stamped into the binary at build time via ldflags from git
+#   describe (see the Makefile). An un-injected build reports the "dev"
+#   sentinel. The canary smoke-test below verifies the ldflags symbol path is
+#   wired correctly before a tag is ever created: a typo in the -X path would
+#   silently yield "dev" in production while every unit test stays green.
+#
 # RUNNER POLICY (devops.md, OB-039):
 #   runs-on: ubuntu-latest. openbrain is a PUBLIC repo and the org's only
 #   self-hosted runner group denies public repos (allows_public_repositories:
 #   false), so this workflow could never be dispatched on self-hosted: it
 #   queued forever. This job is NOT deploy-bearing (deploy_target: none, no
-#   SSH, no DockerHub push): it only pushes a tag and creates a GitHub release
-#   via GITHUB_TOKEN, so the devops.md public-repo/non-deploy-bearing carve-out
+#   SSH, no DockerHub push): it only creates a tag and a GitHub release via
+#   GITHUB_TOKEN, so the devops.md public-repo/non-deploy-bearing carve-out
 #   applies, matching test.yml's runner choice.
 #
 # CONCURRENCY:
@@ -29,24 +42,11 @@
 #   the second run queues rather than cancelling the first mid-flight. A
 #   cancelled mid-flight release is harder to recover from than a queued one.
 #
-# GATES (WRS release standard, Section 6):
+# GATES (releasing.md section 7):
 #   The gates in project.yml release.gates (unit-tests, reviews-complete,
 #   cve-gate) are REQUIRED status checks in the openbrain main branch ruleset.
 #   Kit verifies the gate checks are green before dispatching this workflow.
 #   The workflow itself does not replicate gate logic in `needs:`.
-#
-# FOUR MANDATORY OUTPUTS (WRS release standard, Section 1):
-#   1. Semantic version computed from conventional commits since the last tag.
-#   2. Changelog entry written to CHANGELOG.md.
-#   3. var Version in internal/version/version.go rewritten to the new semver
-#      and committed to main via @semantic-release/exec + @semantic-release/git.
-#   4. Tagged GitHub release created by @semantic-release/github.
-#
-# POST-RELEASE ASSERT:
-#   Confirms the expected release tag exists on the remote. Fires only when
-#   new_release_published == true (real release, not dry-run). A missing tag
-#   after a published release indicates the github plugin failed to push;
-#   the step exits non-zero so the job fails loudly.
 
 name: Release
 
@@ -64,7 +64,7 @@ concurrency:
   cancel-in-progress: false
 
 permissions:
-  contents: write       # required: semantic-release creates the release tag
+  contents: write       # required: @semantic-release/github creates the tag and release
   issues: write         # required: @semantic-release/github creates/closes release issues
   pull-requests: write  # required: @semantic-release/github comments on PRs
 
@@ -79,11 +79,14 @@ jobs:
         with:
           # fetch-depth: 0 is required. semantic-release reads the full tag
           # history to compute the next version. A shallow clone produces an
-          # incorrect or missing bump.
+          # incorrect or missing bump. git describe (for the canary and the
+          # deploy build) also needs the tag history.
           fetch-depth: 0
-          # persist-credentials: true so semantic-release can push the bump
-          # commit (var Version rewrite + CHANGELOG.md) and the release tag.
-          persist-credentials: true
+          # persist-credentials: false: the release makes NO git push. The
+          # github plugin creates the tag and release through the GitHub API
+          # via GITHUB_TOKEN, not a git push, so ambient push credentials are
+          # neither needed nor wanted here.
+          persist-credentials: false
 
       - name: Set up Node
         uses: actions/setup-node@v6
@@ -115,30 +118,38 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Assert var Version line exists in version file (pre-flight)
-        # Verify the grep-count guard will pass before semantic-release runs.
-        # If the var has been moved or renamed, this step fails loudly here
-        # rather than mid-release after the changelog has already been written.
-        run: |
-          VERSION_FILE="internal/version/version.go"
-          PATTERN='var Version = '
-          count=$(grep -c "${PATTERN}" "${VERSION_FILE}" || true)
-          if [ "${count}" -ne 1 ]; then
-            echo "ERROR: expected exactly 1 line matching '${PATTERN}' in ${VERSION_FILE}, found ${count}." >&2
-            echo "Update VERSION_FILE or VERSION_PATTERN in .releaserc.js to match the actual location." >&2
-            exit 1
-          fi
-          echo "OK: var Version line found exactly once in ${VERSION_FILE}."
-
       - name: Build (pre-flight sanity)
-        # Confirm the Go module compiles cleanly before running semantic-release.
+        # Confirm the Go module compiles cleanly before the canary and release.
         # A broken build before the release step prevents a tag from being
         # created for code that does not compile.
         run: go build ./...
 
+      - name: Canary version smoke-test (releasing.md section 4)
+        # Gate the tag on proof that the ldflags -X symbol path is wired
+        # correctly. Build the CLI with a synthetic, non-semver sentinel
+        # injected via the SAME ldflags path the Makefile uses, boot it with
+        # zero dependencies (the `version` subcommand runs before any config or
+        # DB load), and assert it reports EXACTLY the sentinel. A "dev" result
+        # or any mismatch means the -X path is wrong: hard-fail before a tag
+        # exists. Unit tests cannot catch this: they never receive the stamp.
+        run: |
+          SENTINEL="v0.0.0-ldflags-smoke-test"
+          SYMBOL="github.com/windingriverholdings/openbrain/internal/version.Version"
+          CANARY_BIN="$(mktemp -d)/openbrain-canary"
+          go build -ldflags "-X ${SYMBOL}=${SENTINEL}" -o "${CANARY_BIN}" ./cmd/openbrain
+          REPORTED="$("${CANARY_BIN}" version)"
+          rm -f "${CANARY_BIN}"
+          if [ "${REPORTED}" != "${SENTINEL}" ]; then
+            echo "ERROR: canary reported version '${REPORTED}', expected '${SENTINEL}'." >&2
+            echo "The ldflags -X symbol path '${SYMBOL}' is wrong or the accessor changed." >&2
+            echo "A tagged production build would silently report 'dev'. Aborting before tag." >&2
+            exit 1
+          fi
+          echo "OK: canary reported '${REPORTED}'. The ldflags symbol path is wired correctly."
+
       # id: release is REQUIRED. The post-release assert and the no-release
       # signal step both reference steps.release.outputs. Without id: release
-      # those expressions resolve to empty strings and neither step fires correctly.
+      # those expressions resolve to empty strings and neither step fires.
       #
       # DRY_RUN is set via env (not inline shell interpolation) so the boolean
       # input never touches the shell command string directly.
@@ -163,7 +174,7 @@ jobs:
 
       - name: Assert release tag exists on remote (post-release)
         # Fires only when a real release was published (not in dry-run mode).
-        # Confirms the tag was pushed to the remote by the github plugin.
+        # Confirms the tag was created on the remote by the github plugin.
         # TAG_VERSION is set via env to avoid shell-interpolation surprises
         # on unexpected output shapes.
         if: steps.release.outputs.new_release_published == 'true'
@@ -173,31 +184,7 @@ jobs:
           TAG="v${TAG_VERSION}"
           if ! git ls-remote --tags origin "refs/tags/${TAG}" | grep -q "${TAG}"; then
             echo "ERROR: expected tag '${TAG}' not found on remote after release." >&2
-            echo "The @semantic-release/github plugin may have failed to push the tag." >&2
+            echo "The @semantic-release/github plugin may have failed to create the tag." >&2
             exit 1
           fi
           echo "OK: release tag '${TAG}' confirmed on remote."
-
-      - name: Assert var Version was rewritten (post-release)
-        # Fires only on a real release. Reads internal/version/version.go from
-        # the LOCAL working tree, which @semantic-release/exec already rewrote
-        # and @semantic-release/git already committed during the Release step.
-        # No network fetch needed: the file on disk is the authoritative state.
-        # A "dev" value here means the exec prepareCmd failed silently or the
-        # git plugin did not stage the file before committing.
-        if: steps.release.outputs.new_release_published == 'true'
-        env:
-          TAG_VERSION: ${{ steps.release.outputs.new_release_version }}
-        run: |
-          VERSION_FILE="internal/version/version.go"
-          WRITTEN=$(grep 'var Version = ' "${VERSION_FILE}" | sed 's/.*var Version = "\(.*\)".*/\1/')
-          if [ "${WRITTEN}" = "dev" ] || [ -z "${WRITTEN}" ]; then
-            echo "ERROR: ${VERSION_FILE} still contains Version='${WRITTEN}' after release." >&2
-            echo "The @semantic-release/exec prepareCmd may have failed silently." >&2
-            exit 1
-          fi
-          if [ "${WRITTEN}" != "${TAG_VERSION}" ]; then
-            echo "ERROR: ${VERSION_FILE} contains Version='${WRITTEN}', want '${TAG_VERSION}'." >&2
-            exit 1
-          fi
-          echo "OK: var Version='${WRITTEN}' matches release tag v${TAG_VERSION}."
