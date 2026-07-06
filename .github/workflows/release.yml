@@ -15,12 +15,14 @@
 #   There is NO push-to-main auto-trigger. Merging a PR to main does NOT
 #   cut a release. Craig decides when to release; Kit dispatches the workflow.
 #
-# RUNNER POLICY (devops.md):
-#   runs-on: self-hosted. openbrain is a private repo and the standard
-#   devops.md rule requires self-hosted for deploy-bearing CI. This workflow
-#   creates tags and GitHub releases. The ubuntu-latest public-repo carve-out
-#   in test.yml does NOT apply here: test.yml is read-only CI on a public repo;
-#   release.yml is write CI (tag creation, forge release). Use self-hosted.
+# RUNNER POLICY (devops.md, OB-039):
+#   runs-on: ubuntu-latest. openbrain is a PUBLIC repo and the org's only
+#   self-hosted runner group denies public repos (allows_public_repositories:
+#   false), so this workflow could never be dispatched on self-hosted: it
+#   queued forever. This job is NOT deploy-bearing (deploy_target: none, no
+#   SSH, no DockerHub push): it only pushes a tag and creates a GitHub release
+#   via GITHUB_TOKEN, so the devops.md public-repo/non-deploy-bearing carve-out
+#   applies, matching test.yml's runner choice.
 #
 # CONCURRENCY:
 #   cancel-in-progress: false: if an operator accidentally dispatches twice,
@@ -69,7 +71,7 @@ permissions:
 jobs:
   release:
     name: Release
-    runs-on: self-hosted
+    runs-on: ubuntu-latest
 
     steps:
       - name: Checkout (full history)
