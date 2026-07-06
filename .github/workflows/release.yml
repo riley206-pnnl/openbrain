@@ -19,8 +19,15 @@
 #   The main branch is protected (ruleset 16819112: changes must go through a
 #   pull request). semantic-release therefore does NOT rewrite a source version
 #   constant and does NOT push a bump commit to main. Its only outputs are the
-#   git tag (refs/tags/*, not protected) and the GitHub release, both created
-#   by @semantic-release/github. See .releaserc.js for the trimmed plugin chain.
+#   git tag and the GitHub release, both from @semantic-release/github. See
+#   .releaserc.js for the trimmed plugin chain.
+#
+#   semantic-release core DOES push the tag, but the push targets refs/tags/*
+#   (the tag ruleset restricts update and deletion, not creation), and it is
+#   authenticated by a token-bearing remote URL that semantic-release builds
+#   from GITHUB_TOKEN, not by the checkout's ambient stored credentials. That
+#   is why persist-credentials below is false: the tag push does not need them
+#   and no commit ever targets refs/heads/main.
 #
 #   The version is stamped into the binary at build time via ldflags from git
 #   describe (see the Makefile). An un-injected build reports the "dev"
@@ -82,10 +89,11 @@ jobs:
           # incorrect or missing bump. git describe (for the canary and the
           # deploy build) also needs the tag history.
           fetch-depth: 0
-          # persist-credentials: false: the release makes NO git push. The
-          # github plugin creates the tag and release through the GitHub API
-          # via GITHUB_TOKEN, not a git push, so ambient push credentials are
-          # neither needed nor wanted here.
+          # persist-credentials: false: the release makes NO commit to
+          # refs/heads/main. semantic-release pushes only the tag, and it
+          # authenticates that push with a token-bearing remote URL it builds
+          # from GITHUB_TOKEN, so the checkout's ambient stored credentials are
+          # not needed here.
           persist-credentials: false
 
       - name: Set up Node
@@ -110,7 +118,8 @@ jobs:
         # semantic-release has computed and logged the release, making diagnosis
         # harder. This check aborts before any plugin step runs.
         run: |
-          if [ -z "$GITHUB_TOKEN" ]; then
+          set -euo pipefail
+          if [ -z "${GITHUB_TOKEN}" ]; then
             echo "ERROR: GITHUB_TOKEN is empty. Aborting before release step runs." >&2
             exit 1
           fi
@@ -122,23 +131,27 @@ jobs:
         # Confirm the Go module compiles cleanly before the canary and release.
         # A broken build before the release step prevents a tag from being
         # created for code that does not compile.
-        run: go build ./...
+        run: |
+          set -euo pipefail
+          go build ./...
 
       - name: Canary version smoke-test (releasing.md section 4)
         # Gate the tag on proof that the ldflags -X symbol path is wired
         # correctly. Build the CLI with a synthetic, non-semver sentinel
         # injected via the SAME ldflags path the Makefile uses, boot it with
-        # zero dependencies (the `version` subcommand runs before any config or
-        # DB load), and assert it reports EXACTLY the sentinel. A "dev" result
-        # or any mismatch means the -X path is wrong: hard-fail before a tag
+        # zero dependencies (the --version flag runs before any config or DB
+        # load), and assert it reports EXACTLY the sentinel. A "dev" result or
+        # any mismatch means the -X path is wrong: hard-fail before a tag
         # exists. Unit tests cannot catch this: they never receive the stamp.
         run: |
+          set -euo pipefail
           SENTINEL="v0.0.0-ldflags-smoke-test"
           SYMBOL="github.com/windingriverholdings/openbrain/internal/version.Version"
-          CANARY_BIN="$(mktemp -d)/openbrain-canary"
+          CANARY_DIR="$(mktemp -d)"
+          CANARY_BIN="${CANARY_DIR}/openbrain-canary"
           go build -ldflags "-X ${SYMBOL}=${SENTINEL}" -o "${CANARY_BIN}" ./cmd/openbrain
-          REPORTED="$("${CANARY_BIN}" version)"
-          rm -f "${CANARY_BIN}"
+          REPORTED="$("${CANARY_BIN}" --version)"
+          rm -rf "${CANARY_DIR}"
           if [ "${REPORTED}" != "${SENTINEL}" ]; then
             echo "ERROR: canary reported version '${REPORTED}', expected '${SENTINEL}'." >&2
             echo "The ldflags -X symbol path '${SYMBOL}' is wrong or the accessor changed." >&2
@@ -147,9 +160,11 @@ jobs:
           fi
           echo "OK: canary reported '${REPORTED}'. The ldflags symbol path is wired correctly."
 
-      # id: release is REQUIRED. The post-release assert and the no-release
-      # signal step both reference steps.release.outputs. Without id: release
-      # those expressions resolve to empty strings and neither step fires.
+      # id: release lets the later steps address this step's outputs. It does
+      # NOT create those outputs: the step body below writes
+      # new_release_published and new_release_version to $GITHUB_OUTPUT itself
+      # by parsing semantic-release's log, because `npx semantic-release` is a
+      # plain CLI and never populates step outputs on its own.
       #
       # DRY_RUN is set via env (not inline shell interpolation) so the boolean
       # input never touches the shell command string directly.
@@ -159,32 +174,57 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           DRY_RUN: ${{ inputs.dry_run }}
         run: |
+          set -euo pipefail
+          LOG="$(mktemp)"
           if [ "${DRY_RUN}" = "true" ]; then
-            npx semantic-release --dry-run
+            npx semantic-release --dry-run 2>&1 | tee "${LOG}"
           else
-            npx semantic-release
+            npx semantic-release 2>&1 | tee "${LOG}"
           fi
+          # semantic-release core logs "Published release <version> on <channel>
+          # channel" ONLY when a real release is created (never in dry-run and
+          # never when there are no releasable commits). Parse that line as the
+          # authoritative published signal. Strip ANSI color codes first so a
+          # colored CI log still matches.
+          VERSION="$(sed -e 's/\x1b\[[0-9;]*m//g' "${LOG}" \
+            | sed -n 's/.*Published release \([0-9][0-9A-Za-z.+-]*\).*/\1/p' \
+            | tail -n1)"
+          if [ -n "${VERSION}" ]; then
+            echo "new_release_published=true" >> "${GITHUB_OUTPUT}"
+            echo "new_release_version=${VERSION}" >> "${GITHUB_OUTPUT}"
+            echo "Detected published release version: ${VERSION}"
+          else
+            echo "new_release_published=false" >> "${GITHUB_OUTPUT}"
+            echo "No 'Published release' line found: no tag was created this run."
+          fi
+          rm -f "${LOG}"
 
       - name: No release produced (informational)
         if: steps.release.outputs.new_release_published != 'true'
         run: |
-          echo "No release produced. This is normal when no feat/fix/perf commits"
-          echo "exist since the last tag. If a release was expected, inspect the"
-          echo "commit log: non-conventional messages are not counted as releasable."
+          set -euo pipefail
+          echo "No release was published this run. This is expected in dry-run mode,"
+          echo "and also when no feat/fix/perf commits exist since the last tag. If a"
+          echo "real release was expected, inspect the log above: non-conventional"
+          echo "commit messages are not counted as releasable."
 
       - name: Assert release tag exists on remote (post-release)
-        # Fires only when a real release was published (not in dry-run mode).
-        # Confirms the tag was created on the remote by the github plugin.
-        # TAG_VERSION is set via env to avoid shell-interpolation surprises
-        # on unexpected output shapes.
+        # Fires only when a real release was published (parsed above). Confirms
+        # the tag semantic-release reported actually landed on the remote. This
+        # is the section 5 assert that distinguishes "release created" from "ran
+        # cleanly but created nothing": a silent tag-push failure that still
+        # exited zero is caught here. TAG_VERSION is passed via env to avoid
+        # shell-interpolation surprises on unexpected output shapes.
         if: steps.release.outputs.new_release_published == 'true'
         env:
           TAG_VERSION: ${{ steps.release.outputs.new_release_version }}
         run: |
+          set -euo pipefail
           TAG="v${TAG_VERSION}"
           if ! git ls-remote --tags origin "refs/tags/${TAG}" | grep -q "${TAG}"; then
             echo "ERROR: expected tag '${TAG}' not found on remote after release." >&2
-            echo "The @semantic-release/github plugin may have failed to create the tag." >&2
+            echo "semantic-release reported a publish but the tag is not on origin;" >&2
+            echo "the tag push may have failed silently. Failing the run loudly." >&2
             exit 1
           fi
           echo "OK: release tag '${TAG}' confirmed on remote."
