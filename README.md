@@ -27,24 +27,26 @@ Telegram Bot (not yet implemented) ────────┐
 Slack Bot (not yet implemented) ───────────┤
 Web Chat (mybrain.local:10203) ────────────┼──▶  internal/intent (regex classifier)
 CLI (openbrain capture / search) ──────────┤              │
-Claude Code (MCP over stdio) ──────────────┤              ▼
-Folder watcher daemon (auto-ingest) ───────┘        internal/brain (dispatcher)
-                                                             │
-                                    ┌────────────────────────┴───────────────┐
-                                    ▼                                       ▼
-                              Ollama                                 PostgreSQL 16
-                        nomic-embed-text                              + pgvector
-                        768 dims, local daemon                        + pg_trgm
-                        (model swap is config-only)                 HNSW cosine index
+Claude Code (MCP over stdio) ──────────────┘              │
+                                                          ▼
+Folder watcher / ingest (PDF, DOCX, ──▶ internal/docparse ──▶  internal/brain (dispatcher)
+  OCR, PPTX, XLSX)                       (structured pipeline,          │
+                                          bypasses intent)              │
+                                    ┌────────────────────────┬─────────┴────────┐
+                                    ▼                        ▼
+                              Ollama                   PostgreSQL 16
+                        nomic-embed-text                + pgvector
+                        768 dims, local daemon          + pg_trgm
+                        (model swap is config-only)     HNSW cosine index
 ```
 
-All six binaries are Go, built from a single module. Embeddings run through a local Ollama daemon, not an in-process library, so swapping models is a config change plus `openbrain reembed` (see [Database Schema](#database-schema)).
+All six binaries are Go, built from a single module. Interactive input (web chat, CLI free text) is routed by the `internal/intent` regex classifier; document ingestion (the folder watcher and the `ingest_document` path) instead runs through the `internal/docparse` structured pipeline and does not touch the classifier. Embeddings run through a local Ollama daemon, not an in-process library, so swapping models is a config change plus `openbrain reembed` (see [Database Schema](#database-schema)).
 
 ---
 
 ## Features
 
-- **Hybrid search**: semantic (HNSW cosine similarity) and keyword (BM25 via `pg_trgm`) combined, weighted per query
+- **Hybrid search**: semantic (HNSW cosine similarity) and keyword (native PostgreSQL full-text search, a weighted `tsvector` ranked with `ts_rank`) combined and weighted per query
 - **Typed thoughts**: decisions, insights, people, meetings, ideas, notes, memories
 - **Temporal fact tracking**: supersede an old thought when new knowledge replaces it, and query the timeline for any subject
 - **Document ingestion**: PDF and DOCX built in; PPTX and XLSX via the `markitdown` CLI; OCR (Tesseract) available in source builds with `make build-ocr` (not included in the published release binaries, see Quick Start)
@@ -55,7 +57,7 @@ All six binaries are Go, built from a single module. Embeddings run through a lo
 - **Systemd daemons**: the web server and any bots run as user services with auto-restart
 - **Fully private by default**: PostgreSQL on bare metal, embeddings via a local Ollama daemon, zero telemetry (see [Privacy](#privacy) for the one opt-in exception)
 
-Telegram and Slack integration are scaffolded (config, systemd units, binaries) but the bots themselves are not yet implemented; both `cmd/openbrain-telegram` and `cmd/openbrain-slack` currently just log a placeholder message and exit idle.
+Telegram and Slack integration are scaffolded (config, systemd units, binaries) but the bots themselves are not yet implemented. Both `cmd/openbrain-telegram` and `cmd/openbrain-slack` currently log one placeholder line and exit 0.
 
 ---
 
@@ -64,14 +66,14 @@ Telegram and Slack integration are scaffolded (config, systemd units, binaries) 
 | Layer | Choice | Why |
 |---|---|---|
 | Language | Go | Single static binary per component, no runtime dependency tree |
-| Database | PostgreSQL 16 + pgvector + pg_trgm | Battle-tested, HNSW ANN search, trigram fallback for keyword search |
+| Database | PostgreSQL 16 + pgvector + pg_trgm | Battle-tested, HNSW ANN search, native full-text keyword search (`tsvector` + `ts_rank`) |
 | Embeddings | Ollama + `nomic-embed-text` | Local daemon, 768 dims, 8192 token context, no cloud API |
-| MCP server | Go, `mark3labs/mcp-go` | stdio transport for Claude Code; HTTP + SSE with OAuth 2.1 available from `openbrain-web` |
+| MCP server | Go, `mark3labs/mcp-go` | stdio transport for Claude Code; HTTP + SSE with OAuth 2.0 (authorization-code grant with S256 PKCE) available from `openbrain-web` |
 | Web server | Go `net/http` + `gorilla/websocket` | Minimal, real-time chat UI, also hosts the REST API and optional MCP HTTP transport |
 | Document parsing | Built-in (PDF, DOCX) + `markitdown` CLI (PPTX, XLSX); OCR (Tesseract) opt-in via `make build-ocr` | Native Go parsing where practical, external tool only where it earns its keep; OCR needs cgo + system tesseract, so it is not in the default build |
 | Deployment | systemd user services | No Docker overhead, native process supervision |
 
-Full decision log with rationale: [DECISIONS.md](DECISIONS.md). Note that decision 002 there predates OB-024's switch from the original in-process `fastembed` approach to the current Ollama-based `nomic-embed-text` setup described above; treat the stack table above as the current source of truth.
+Full decision log with rationale: [DECISIONS.md](DECISIONS.md). Several early entries there predate the Go rewrite and describe a superseded design: decision 002 (in-process `fastembed` embeddings, since replaced by the Ollama `nomic-embed-text` setup above), decision 003 (a Python MCP server, now Go), and decision 004 (the `pixi` package manager, no longer used). Treat the stack table above as the current source of truth.
 
 ---
 
@@ -129,7 +131,16 @@ openbrain --version
 
 This should print the release version (for example `v0.4.0`), stamped in at build time from the release tag. It exits immediately with no database or config required, so it works as a quick sanity check even before `.env` is set up.
 
-**4. Continue with setup.** Copy `.env.example` to `.env`, run `scripts/setup-db.sh` to create the database and apply migrations, then `scripts/setup-mcp.sh` to register `openbrain-mcp` with Claude Code. These scripts expect the binaries at `bin/<name>` by default (the `make build` layout); if you installed to `/usr/local/bin` instead, either symlink `bin/openbrain-mcp` to the installed binary or pass the path directly to `claude mcp add`.
+**4. Get the setup files.** The release publishes only the six binaries and `SHA256SUMS`. The database schema, the setup scripts, and the config template all live in the repository, so a binary install still needs those files from the repo. The lightest way to get them without a full source build is a shallow clone:
+
+```bash
+git clone --depth 1 https://github.com/windingriverholdings/openbrain openbrain-setup
+cd openbrain-setup
+```
+
+This gives you `.env.example`, the `sql/` migrations, and `scripts/setup-db.sh` / `scripts/setup-mcp.sh`. If you would rather not clone, fetch the individual files from the `main` branch over raw GitHub (`.env.example`, every file under `sql/`, and the two scripts under `scripts/`) into a matching directory layout; the scripts resolve `sql/` relative to their own location, so keep `scripts/` and `sql/` as siblings.
+
+**5. Run setup.** From the directory holding the setup files: copy `.env.example` to `.env` and set `OPENBRAIN_DB_PASSWORD`, run `scripts/setup-db.sh` to create the database and apply migrations, then `scripts/setup-mcp.sh` to register `openbrain-mcp` with Claude Code. `setup-mcp.sh` looks for the MCP binary at `bin/openbrain-mcp` relative to the repo root; if you installed the prebuilt binary to `/usr/local/bin` instead, either symlink `bin/openbrain-mcp` to it or point `claude mcp add` at the installed path directly.
 
 ### Option B: Build from source
 
@@ -168,16 +179,16 @@ Add `mybrain.local` to `/etc/hosts` if not already there:
 
 ### Telegram and Slack bots
 
-`openbrain-telegram` and `openbrain-slack` are scaffolded (config keys, systemd units) but not yet implemented: running either currently just logs a placeholder message. `.env.example` documents the token variables (`OPENBRAIN_TELEGRAM_BOT_TOKEN`, `OPENBRAIN_SLACK_BOT_TOKEN`, etc.) for when that lands.
+`openbrain-telegram` and `openbrain-slack` are scaffolded (config keys, systemd units) but not yet implemented: running either logs one placeholder line and exits 0. `.env.example` documents the token variables (`OPENBRAIN_TELEGRAM_BOT_TOKEN`, `OPENBRAIN_SLACK_BOT_TOKEN`, etc.) for when that lands.
 
 ### Install as system daemons
 
 ```bash
 bash scripts/install-services.sh
-# Installs systemd --user units for openbrain-web, openbrain-telegram, openbrain-slack, and openbrain-watchd
+# Copies systemd --user units for openbrain-web, openbrain-telegram, openbrain-slack, and openbrain-watchd
 ```
 
-The script builds the binaries itself (`make build`) if they're not already present. Bot units will install and start but stay idle until the bots are implemented (see above).
+The script builds the binaries itself (`make build`) if they are not already present, then enables and starts `openbrain-web` and `openbrain-watchd`. It enables `openbrain-telegram` only when a real `OPENBRAIN_TELEGRAM_BOT_TOKEN` is set in `.env`. The `openbrain-slack` unit is copied but not enabled or started. Because the telegram and slack binaries are stubs that exit 0 (a clean exit, which `Restart=on-failure` does not restart), their units stay inactive even once enabled, until the bots are implemented.
 
 ---
 
@@ -227,7 +238,7 @@ After running `setup-mcp.sh`, these tools are available in every Claude Code ses
 | `extract_thoughts` | Extract structured thoughts from long-form text using an LLM |
 | `ingest_document` | Ingest a document (PDF, DOCX, or image via OCR) and optionally auto-capture it as thoughts |
 
-`openbrain-mcp` serves these over stdio only, the standard transport for a local Claude Code integration. `openbrain-web` additionally exposes an HTTP + SSE MCP transport with OAuth 2.1 (for remote clients such as Claude.ai's connector) when `OPENBRAIN_MCP_HTTP_ENABLED=true` is set; see `.env.example` for the required token and OAuth settings.
+`openbrain-mcp` serves all nine tools over stdio, the standard transport for a local Claude Code integration. `openbrain-web` additionally exposes an HTTP + SSE MCP transport with OAuth 2.0 (for remote clients such as Claude.ai's connector) when `OPENBRAIN_MCP_HTTP_ENABLED=true` is set; see `.env.example` for the required token and OAuth settings. The HTTP/SSE transport deliberately excludes `ingest_document` (it reads the local filesystem, which should not be reachable from a remote client), so a remote connection exposes eight tools, not nine.
 
 ---
 
@@ -239,7 +250,7 @@ OpenBrain understands natural language via a regex classifier (`internal/intent`
 ```
 decided to use Postgres over MySQL for the user service
 realised that deploys on Fridays are always risky
-met Bob Jones, runs engineering at Acme, former Google
+met Bob Jones: runs engineering at Acme, former Google
 remember: the API rate limit is 1000 req/min
 ```
 
@@ -274,10 +285,10 @@ Four prompt kits to get you started, copy and paste into any AI:
 
 | Kit | Purpose |
 |---|---|
-| [1, Memory Migration](prompts/1_memory_migration.md) | Extract what your AI already knows about you and import it |
-| [2, Open Brain Spark](prompts/2_open_brain_spark.md) | Interview to discover your ideal capture workflow |
-| [3, Quick Capture Templates](prompts/3_quick_capture.md) | Sentence starters for fast, structured capture |
-| [4, Weekly Review](prompts/4_weekly_review.md) | End-of-week synthesis with clustering |
+| [Kit 1: Memory Migration](prompts/1_memory_migration.md) | Extract what your AI already knows about you and import it |
+| [Kit 2: Open Brain Spark](prompts/2_open_brain_spark.md) | Interview to discover your ideal capture workflow |
+| [Kit 3: Quick Capture Templates](prompts/3_quick_capture.md) | Sentence starters for fast, structured capture |
+| [Kit 4: Weekly Review](prompts/4_weekly_review.md) | End-of-week synthesis with clustering |
 
 ---
 
@@ -294,7 +305,7 @@ CREATE TABLE thoughts (
     id            UUID          PRIMARY KEY DEFAULT gen_random_uuid(),
     content       TEXT          NOT NULL,
     summary       TEXT,
-    embedding     vector,                          -- untyped: dimension is config, not schema (OB-024)
+    embedding     vector,                          -- untyped: dimension is config, not schema
     thought_type  thought_type  NOT NULL DEFAULT 'note',
     tags          TEXT[]        NOT NULL DEFAULT '{}',
     source        VARCHAR(100)  NOT NULL DEFAULT 'cli',
