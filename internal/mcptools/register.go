@@ -6,13 +6,13 @@ package mcptools
 import (
 	"context"
 
+	"github.com/mark3labs/mcp-go/mcp"
+	"github.com/mark3labs/mcp-go/server"
 	"github.com/windingriverholdings/openbrain/internal/brain"
 	"github.com/windingriverholdings/openbrain/internal/config"
 	"github.com/windingriverholdings/openbrain/internal/embeddings"
 	"github.com/windingriverholdings/openbrain/internal/extract"
 	"github.com/windingriverholdings/openbrain/internal/intent"
-	"github.com/mark3labs/mcp-go/mcp"
-	"github.com/mark3labs/mcp-go/server"
 )
 
 var thoughtTypeEnum = []string{"decision", "insight", "person", "meeting", "idea", "note", "memory"}
@@ -134,7 +134,7 @@ func RegisterToolsWithOpts(s *server.MCPServer, b *brain.Brain, embedder embeddi
 
 	s.AddTool(
 		mcp.NewTool("supersede_thought",
-			mcp.WithDescription("Capture a new thought and mark an older thought as superseded. Use when updated knowledge replaces a previous belief, decision, or fact. Provide old_thought_id to supersede directly, or let OpenBrain find the best match via supersedes_query."),
+			mcp.WithDescription("Capture a new thought and mark an older thought as superseded. Use when updated knowledge replaces a previous belief, decision, or fact. Provide old_thought_id to supersede directly, or let OpenBrain find the best match via supersedes_query. The capture and the supersede are atomic: if the old thought cannot be marked superseded, nothing is captured and the call returns an error."),
 			mcp.WithString("content", mcp.Required(), mcp.Description("The new thought that replaces the old one")),
 			mcp.WithString("supersedes_query", mcp.Description("Search query to find the thought being superseded; defaults to the new content")),
 			mcp.WithString("old_thought_id", mcp.Description("UUID of the thought to supersede directly (skips search)")),

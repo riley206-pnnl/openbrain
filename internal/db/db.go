@@ -46,6 +46,30 @@ func InsertThought(ctx context.Context, p *pgxpool.Pool, content string, embeddi
 	if len(embedding) == 0 {
 		return "", fmt.Errorf("insert thought: empty embedding vector (must have at least 1 dimension)")
 	}
+
+	id, err := insertThoughtTx(ctx, p, content, embedding, thoughtType, tags, source, summary, metadata)
+	if err != nil {
+		return "", err
+	}
+
+	slog.Info("thought inserted", "id", id[:8], "type", thoughtType, "source", source)
+	return id, nil
+}
+
+// thoughtInserter is satisfied by both *pgxpool.Pool and pgx.Tx, letting
+// insertThoughtTx run identically whether or not it is inside an explicit
+// transaction.
+type thoughtInserter interface {
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+}
+
+// insertThoughtTx runs the INSERT ... RETURNING id shared by InsertThought
+// (outside a transaction) and SupersedeCapture (inside one), so the insert
+// statement lives in exactly one place and cannot drift between the two
+// callers. It does not log: InsertThought and SupersedeCapture each log their
+// own outcome once, at the point where they know whether the whole operation
+// succeeded.
+func insertThoughtTx(ctx context.Context, q thoughtInserter, content string, embedding []float32, thoughtType string, tags []string, source string, summary *string, metadata map[string]any) (string, error) {
 	if metadata == nil {
 		metadata = map[string]any{}
 	}
@@ -54,7 +78,7 @@ func InsertThought(ctx context.Context, p *pgxpool.Pool, content string, embeddi
 	}
 
 	var id string
-	err := p.QueryRow(ctx, `
+	err := q.QueryRow(ctx, `
 		INSERT INTO thoughts (content, summary, embedding, thought_type, tags, source, metadata)
 		VALUES ($1, $2, $3::vector, $4::thought_type, $5, $6, $7)
 		RETURNING id::text`,
@@ -63,8 +87,6 @@ func InsertThought(ctx context.Context, p *pgxpool.Pool, content string, embeddi
 	if err != nil {
 		return "", fmt.Errorf("insert thought: %w", err)
 	}
-
-	slog.Info("thought inserted", "id", id[:8], "type", thoughtType, "source", source)
 	return id, nil
 }
 
