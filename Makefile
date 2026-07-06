@@ -6,6 +6,14 @@ CMDS    := openbrain openbrain-mcp openbrain-web openbrain-telegram openbrain-sl
 BINS    := $(addprefix $(BINDIR)/,$(CMDS))
 BUILD_TAGS ?=
 
+# Version stamping: the version flows from the nearest git tag into the
+# binary at build time via linker flags. No source file is rewritten at
+# release time. An un-injected build (no tag reachable) falls back to the
+# "dev" sentinel baked into internal/version/version.go.
+VERSION_PKG := github.com/windingriverholdings/openbrain/internal/version
+VERSION     := $(shell git describe --tags --always 2>/dev/null || echo dev)
+LDFLAGS     := -X $(VERSION_PKG).Version=$(VERSION)
+
 .PHONY: all build build-ocr test test-cover test-verbose lint vet clean install fixtures setup-db
 
 ## Default: show help
@@ -15,7 +23,7 @@ build: $(BINS)
 
 $(BINDIR)/%: cmd/%/*.go internal/**/*.go go.mod go.sum
 	@mkdir -p $(BINDIR)
-	$(GO) build $(if $(BUILD_TAGS),-tags $(BUILD_TAGS)) -o $@ ./cmd/$*
+	$(GO) build $(if $(BUILD_TAGS),-tags $(BUILD_TAGS)) -ldflags "$(LDFLAGS)" -o $@ ./cmd/$*
 
 ## Build all binaries with OCR support (requires tesseract-ocr + libtesseract-dev)
 build-ocr:
@@ -54,9 +62,9 @@ setup-db:
 
 ## Install binaries to GOPATH/bin
 install:
-	$(GO) install ./cmd/openbrain
-	$(GO) install ./cmd/openbrain-mcp
-	$(GO) install ./cmd/openbrain-web
+	$(GO) install -ldflags "$(LDFLAGS)" ./cmd/openbrain
+	$(GO) install -ldflags "$(LDFLAGS)" ./cmd/openbrain-mcp
+	$(GO) install -ldflags "$(LDFLAGS)" ./cmd/openbrain-web
 
 ## Remove build artifacts
 clean:

@@ -1,88 +1,50 @@
 // .releaserc.js: openbrain semantic-release config.
 //
 // EXTENDS the shared WRS config pinned at github:windingriverholdings/
-// semantic-release-config#v0.2.0. The five-plugin chain (commit-analyzer,
-// release-notes-generator, changelog, git, github) is inherited from the
-// shared config. This file inserts @semantic-release/exec between the
-// changelog and git steps to rewrite the canonical version var before the
-// bump commit is made.
+// semantic-release-config#v0.2.0. The shared config's default plugin chain
+// (commit-analyzer, release-notes-generator, changelog, git, github) writes a
+// CHANGELOG.md and pushes a bump commit to main via @semantic-release/git.
 //
-// Plugin order:
-//   1. commitAnalyzer: compute bump type from conventional commits
-//   2. releaseNotes:   generate changelog entry
-//   3. changelog:      write CHANGELOG.md
-//   4. exec:           rewrite var Version in internal/version/version.go
-//   5. git:            commit the rewritten version file and CHANGELOG.md
-//   6. github:         create the tag and GitHub release
+// openbrain's main branch is protected (ruleset 16819112: "Changes must be
+// made through a pull request"), so the github-actions[bot] GITHUB_TOKEN
+// identity cannot push a bump commit to refs/heads/main. It is rejected with
+// GH013 and the release fails after the version is already computed.
 //
-// The @semantic-release/exec prepareCmd:
-//   a. grep-count guard: fails loudly if the var line is not found exactly
-//      once (catches refactors that move the var without updating this file).
-//   b. sed rewrite: replaces the "dev" (or previous semver) literal with the
-//      computed ${nextRelease.version} string.
+// Per .claude/rules/releasing.md section 3, the version is NOT a source
+// constant rewritten at release time. It is stamped into the binary at build
+// time via ldflags from git describe (see the Makefile). The release flow
+// therefore makes ZERO push to refs/heads/main: it creates only the git tag
+// and the GitHub release.
 //
-// Named-plugin composition (v0.2.0+ API):
-//   Plugins are composed by destructuring base.namedPlugins, not by positional
-//   index. Named references are stable across chain reorders; positional
-//   indices break silently when the shared config grows or reorders.
+// This config overrides the shared plugin array to drop the two branch-writing
+// plugins:
+//   - changelog: removed. The changelog lives in the GitHub release notes
+//     (produced by release-notes-generator and published by the github
+//     plugin), not in a CHANGELOG.md committed to main.
+//   - git: removed. It is the plugin that pushed HEAD:main. Removing it is the
+//     fix for the GH013 rejection.
 //
-//   base.namedPlugins.git is the tuple ['@semantic-release/git', { assets, message }].
-//   To override the assets list, we destructure the tuple and spread the base
-//   options, then add VERSION_FILE to assets. This keeps the base commit
-//   message template intact and avoids duplicating it here.
+// The retained plugins:
+//   1. commitAnalyzer: compute the semver bump from conventional commits.
+//   2. releaseNotes:   generate the release notes for the new version.
+//   3. github:         create the git TAG (refs/tags/*, not protected) and the
+//      GitHub release, publishing the generated notes. This is the sole
+//      version authority's terminal output; it makes no commit to main.
 //
-// Maintenance: if the shared config adds a new named plugin, add the
-// corresponding destructure here. Divergence from the shared plugin chain
-// is a review finding.
+// Named-plugin composition (v0.2.0+ API): plugins are referenced by name from
+// base.namedPlugins, not by positional index, so a shared-config reorder does
+// not silently reshuffle this chain.
 
 'use strict'
 
 const base = require('@wrsoftware/semantic-release-config')
-const { commitAnalyzer, releaseNotes, changelog, git, github } = base.namedPlugins
-
-// VERSION_FILE is the path (relative to repo root) containing the canonical
-// var Version line. Update this constant if the file is ever moved, and
-// update the corresponding version_file in projects/openbrain/project.yml.
-const VERSION_FILE = 'internal/version/version.go'
-
-// VERSION_PATTERN is the exact string that identifies the var line.
-// It must match the line verbatim (modulo the version string itself) so the
-// grep-count guard and the sed substitution target the same line.
-const VERSION_PATTERN = 'var Version = '
-
-// gitPluginName and gitPluginOpts: destructure the base git tuple so we can
-// extend the assets list without re-stating the commit message template.
-// git is ['@semantic-release/git', { assets: ['CHANGELOG.md'], message: '...' }]
-const [gitPluginName, gitPluginOpts] = git
+const { commitAnalyzer, releaseNotes, github } = base.namedPlugins
 
 module.exports = {
   extends: '@wrsoftware/semantic-release-config',
   plugins: [
-    commitAnalyzer,   // step 1: analyze commits, compute bump type
-    releaseNotes,     // step 2: generate changelog entry
-    changelog,        // step 3: write CHANGELOG.md
-    // step 4: rewrite var Version in internal/version/version.go.
-    // The grep-count guard fires before sed; if the pattern is not found
-    // exactly once, the prepare step fails loudly and the release is aborted
-    // before any tag is created.
-    ['@semantic-release/exec', {
-      prepareCmd:
-        // Guard: confirm the var line exists exactly once.
-        `count=$(grep -c '${VERSION_PATTERN}' ${VERSION_FILE}); ` +
-        `if [ "$count" -ne 1 ]; then ` +
-        `  echo "ERROR: expected exactly 1 line matching '${VERSION_PATTERN}' in ${VERSION_FILE}, found $count" >&2; ` +
-        `  exit 1; ` +
-        `fi; ` +
-        // Rewrite: replace the quoted string after 'var Version = ' with the new version.
-        `sed -i 's|${VERSION_PATTERN}"[^"]*"|${VERSION_PATTERN}"\${nextRelease.version}"|' ${VERSION_FILE}`
-    }],
-    // step 5: commit CHANGELOG.md and the rewritten version file.
-    // Extends the base git plugin options: keeps the shared commit message
-    // template and adds VERSION_FILE to the assets list.
-    [gitPluginName, {
-      ...gitPluginOpts,
-      assets: [...gitPluginOpts.assets, VERSION_FILE]
-    }],
-    github            // step 6: create the tag and GitHub release
+    commitAnalyzer, // step 1: analyze commits, compute bump type
+    releaseNotes,   // step 2: generate release notes
+    github          // step 3: create the tag and GitHub release (no push to main)
   ]
 }

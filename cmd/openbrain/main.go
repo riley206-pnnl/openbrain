@@ -16,6 +16,7 @@ import (
 	"github.com/windingriverholdings/openbrain/internal/db"
 	"github.com/windingriverholdings/openbrain/internal/embeddings"
 	"github.com/windingriverholdings/openbrain/internal/intent"
+	"github.com/windingriverholdings/openbrain/internal/version"
 )
 
 func main() {
@@ -24,6 +25,20 @@ func main() {
 	if len(os.Args) < 2 {
 		printUsage()
 		os.Exit(1)
+	}
+
+	// --version reports the build version and exits before any config load or
+	// DB connection. This is the release canary's version-reporting path: it
+	// must boot with zero dependencies so the smoke-test can assert the ldflags
+	// stamp without a database or .env present.
+	//
+	// The trigger is the flag form ONLY. A bare "version" word would shadow the
+	// free-text capture path (for example, "version 2 ships tomorrow" would be
+	// swallowed instead of captured as a thought), so it is deliberately not a
+	// trigger.
+	if os.Args[1] == "--version" {
+		fmt.Println(version.Version)
+		return
 	}
 
 	cfg := config.MustLoad()
@@ -185,5 +200,6 @@ Usage:
   openbrain stats              Show statistics
   openbrain reembed            Re-embed all thoughts with NULL embeddings
   openbrain import <file>      Import from JSON file
-  openbrain <text>             Auto-classify and dispatch`)
+  openbrain <text>             Auto-classify and dispatch
+  openbrain --version          Print the build version and exit`)
 }
