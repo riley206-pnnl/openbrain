@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -21,7 +22,36 @@ var (
 	// concurrent supersede of the same target observes this and does not mint a
 	// duplicate live thought.
 	ErrAlreadySuperseded = errors.New("supersede: old thought already superseded")
+	// ErrRetireRaceLost means the retire UPDATE affected zero rows even though
+	// the SELECT ... FOR UPDATE moments earlier observed is_current = true.
+	// Under correct row-level locking this should never happen: it signals a
+	// distinct invariant violation from ErrAlreadySuperseded (which fires at
+	// the lock gate, before any write), so it is not reused for this case.
+	ErrRetireRaceLost = errors.New("supersede: retire affected zero rows despite holding the row lock")
 )
+
+// supersedeRollbackTimeout bounds the deferred tx.Rollback in SupersedeCapture.
+// It runs on a fresh context derived from Background, not the caller's ctx, so
+// a request whose context is already cancelled still gets a clean rollback
+// instead of poisoning the pooled connection.
+const supersedeRollbackTimeout = 5 * time.Second
+
+// supersedeTestHooks lets integration tests in this package force real
+// Postgres failure modes that an in-memory fake cannot prove. Both fields are
+// nil in production and unexported, so no code outside this package can set
+// them.
+var supersedeTestHooks struct {
+	// failAfterInsert, when non-nil, runs after the new thought INSERT
+	// succeeds and before the retire UPDATE. A non-nil return aborts the
+	// transaction, proving the new thought does not survive a real
+	// tx.Rollback triggered between insert and commit.
+	failAfterInsert func() error
+	// retireIDOverride, when non-nil, replaces the id used in the retire
+	// UPDATE's WHERE clause, letting a test force a genuine zero-rows-affected
+	// outcome against real Postgres without weakening the row lock discipline
+	// on the production path.
+	retireIDOverride func(oldID string) string
+}
 
 // SupersedeParams carries everything needed to atomically capture the new
 // thought and retire the old one in a single transaction.
@@ -31,8 +61,6 @@ type SupersedeParams struct {
 	ThoughtType string
 	Tags        []string
 	Source      string
-	Summary     *string
-	Metadata    map[string]any
 	// OldID is the thought being retired.
 	OldID string
 }
@@ -49,10 +77,6 @@ func SupersedeCapture(ctx context.Context, p *pgxpool.Pool, params SupersedePara
 	if len(params.Embedding) == 0 {
 		return "", fmt.Errorf("supersede capture: empty embedding vector")
 	}
-	metadata := params.Metadata
-	if metadata == nil {
-		metadata = map[string]any{}
-	}
 	tags := params.Tags
 	if tags == nil {
 		tags = []string{}
@@ -62,9 +86,16 @@ func SupersedeCapture(ctx context.Context, p *pgxpool.Pool, params SupersedePara
 	if err != nil {
 		return "", fmt.Errorf("supersede capture: begin tx: %w", err)
 	}
-	// Rollback is a no-op once the tx has committed, so this defer is safe on
-	// both the success and failure paths.
-	defer func() { _ = tx.Rollback(ctx) }()
+	// Roll back on a fresh, short-timeout context derived from Background,
+	// never the caller's ctx: if the request ctx is already cancelled,
+	// rolling back on it can fail to release the connection cleanly and
+	// poison the pool. Rollback is a no-op once the tx has committed, so this
+	// defer is safe on both the success and failure paths.
+	defer func() {
+		rollbackCtx, cancel := context.WithTimeout(context.Background(), supersedeRollbackTimeout)
+		defer cancel()
+		_ = tx.Rollback(rollbackCtx)
+	}()
 
 	// Lock the old row for the lifetime of the transaction. A concurrent
 	// supersede of the same target blocks here until we commit, then reads the
@@ -84,33 +115,46 @@ func SupersedeCapture(ctx context.Context, p *pgxpool.Pool, params SupersedePara
 		return "", ErrAlreadySuperseded
 	}
 
-	// Capture the new thought inside the transaction.
-	err = tx.QueryRow(ctx, `
-		INSERT INTO thoughts (content, summary, embedding, thought_type, tags, source, metadata)
-		VALUES ($1, $2, $3::vector, $4::thought_type, $5, $6, $7)
-		RETURNING id::text`,
-		params.Content, params.Summary, VecLiteral(params.Embedding),
-		params.ThoughtType, tags, params.Source, metadata,
-	).Scan(&newID)
+	// Capture the new thought inside the transaction, via the same helper
+	// InsertThought uses outside a transaction. SupersedeParams carries no
+	// summary/metadata today (no caller sets them), so both are nil here.
+	newID, err = insertThoughtTx(ctx, tx, params.Content, params.Embedding,
+		params.ThoughtType, tags, params.Source, nil, nil)
 	if err != nil {
-		return "", fmt.Errorf("supersede capture: insert new thought: %w", err)
+		return "", fmt.Errorf("supersede capture: %w", err)
+	}
+
+	// Test-only seam: force a failure after the insert has succeeded but
+	// before commit, proving a real Postgres rollback discards the new
+	// thought. Nil in production.
+	if supersedeTestHooks.failAfterInsert != nil {
+		if hookErr := supersedeTestHooks.failAfterInsert(); hookErr != nil {
+			return "", fmt.Errorf("supersede capture: %w", hookErr)
+		}
+	}
+
+	retireID := params.OldID
+	if supersedeTestHooks.retireIDOverride != nil {
+		retireID = supersedeTestHooks.retireIDOverride(params.OldID)
 	}
 
 	// Retire the old thought. The is_current guard makes this a no-op if the
-	// row was retired between the lock and here (belt and suspenders alongside
-	// FOR UPDATE); RowsAffected must be exactly 1.
+	// row was retired between the lock and here; RowsAffected must be exactly
+	// 1 under correct lock discipline. A different count is a distinct
+	// invariant violation from ErrAlreadySuperseded (which is caught earlier,
+	// at the lock gate) so it gets its own sentinel.
 	tag, err := tx.Exec(ctx, `
 		UPDATE thoughts
 		SET is_current = FALSE, valid_until = NOW(), superseded_by = $1::uuid
 		WHERE id = $2::uuid AND is_current = TRUE`,
-		newID, params.OldID,
+		newID, retireID,
 	)
 	if err != nil {
 		return "", fmt.Errorf("supersede capture: mark old superseded: %w", err)
 	}
 	if tag.RowsAffected() != 1 {
-		return "", fmt.Errorf("supersede capture: expected to retire exactly 1 row, affected %d: %w",
-			tag.RowsAffected(), ErrAlreadySuperseded)
+		return "", fmt.Errorf("supersede capture: retire affected %d rows, expected 1: %w",
+			tag.RowsAffected(), ErrRetireRaceLost)
 	}
 
 	if err = tx.Commit(ctx); err != nil {
