@@ -12,6 +12,7 @@ import (
 
 	"github.com/windingriverholdings/openbrain/internal/db"
 	"github.com/windingriverholdings/openbrain/internal/intent"
+	"github.com/windingriverholdings/openbrain/internal/model"
 )
 
 // staticEmbedder returns a fixed-length embedding for any text. It lets the
@@ -303,4 +304,86 @@ func TestSupersede_EmbedQueryFailure(t *testing.T) {
 	require.Error(t, err)
 	assert.Empty(t, msg)
 	assert.Contains(t, err.Error(), "embed supersede query")
+}
+
+// TestSupersede_SearchError covers the resolveSupersedeTarget branch where
+// the search-based lookup itself fails: the error must surface, and the
+// atomic supersedeFn must never run.
+func TestSupersede_SearchError(t *testing.T) {
+	b := &Brain{embedder: staticEmbedder{}}
+	b.supersedeSearchFn = func(ctx context.Context, embedding []float32) ([]model.ThoughtRow, error) {
+		return nil, errors.New("search backend down")
+	}
+	b.supersedeFn = func(context.Context, db.SupersedeParams) (string, error) {
+		t.Fatal("supersedeFn must not run when the search itself fails")
+		return "", nil
+	}
+
+	parsed := intent.ParsedIntent{
+		Intent:      intent.Supersede,
+		Text:        "new content, search will fail",
+		ThoughtType: "insight",
+	}
+	msg, err := b.Supersede(context.Background(), parsed, "test")
+	require.Error(t, err)
+	assert.Empty(t, msg)
+	assert.Contains(t, err.Error(), "supersede search")
+}
+
+// TestSupersede_SearchNoMatchFallsBackToCapture covers the resolveSupersedeTarget
+// branch where the search returns zero matches: Supersede must fall back to a
+// plain capture (via captureFn) instead of attempting to retire anything.
+func TestSupersede_SearchNoMatchFallsBackToCapture(t *testing.T) {
+	b := &Brain{embedder: staticEmbedder{}}
+	b.supersedeSearchFn = func(ctx context.Context, embedding []float32) ([]model.ThoughtRow, error) {
+		return nil, nil // no prior match
+	}
+	b.supersedeFn = func(context.Context, db.SupersedeParams) (string, error) {
+		t.Fatal("supersedeFn must not run when there is no match to supersede")
+		return "", nil
+	}
+	var capturedParsed intent.ParsedIntent
+	captureCalled := false
+	b.captureFn = func(ctx context.Context, parsed intent.ParsedIntent, source string) (string, error) {
+		captureCalled = true
+		capturedParsed = parsed
+		return "Captured [insight] deadbeef (test)", nil
+	}
+
+	parsed := intent.ParsedIntent{
+		Intent:      intent.Supersede,
+		Text:        "new content, no prior match to supersede",
+		ThoughtType: "insight",
+	}
+	msg, err := b.Supersede(context.Background(), parsed, "test")
+	require.NoError(t, err)
+	assert.True(t, captureCalled, "must fall back to captureFn when search finds no match")
+	assert.Equal(t, parsed.Text, capturedParsed.Text)
+	assert.Contains(t, msg, "Captured")
+}
+
+// TestSupersede_SearchMatchFound covers the resolveSupersedeTarget branch
+// where the search finds a prior match: Supersede must retire exactly that
+// matched thought.
+func TestSupersede_SearchMatchFound(t *testing.T) {
+	matchID := "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+	b := &Brain{embedder: staticEmbedder{}}
+	b.supersedeSearchFn = func(ctx context.Context, embedding []float32) ([]model.ThoughtRow, error) {
+		return []model.ThoughtRow{{ID: matchID}}, nil
+	}
+	var gotOldID string
+	b.supersedeFn = func(ctx context.Context, params db.SupersedeParams) (string, error) {
+		gotOldID = params.OldID
+		return "11111111-2222-3333-4444-555555555555", nil
+	}
+
+	parsed := intent.ParsedIntent{
+		Intent:      intent.Supersede,
+		Text:        "new content that supersedes the matched thought",
+		ThoughtType: "insight",
+	}
+	msg, err := b.Supersede(context.Background(), parsed, "test")
+	require.NoError(t, err)
+	assert.Equal(t, matchID, gotOldID, "must retire exactly the matched thought")
+	assert.Contains(t, msg, "supersedes")
 }

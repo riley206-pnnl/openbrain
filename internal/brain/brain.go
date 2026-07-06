@@ -36,6 +36,13 @@ type Brain struct {
 	// defaulted in New to db.SupersedeCapture. It exists so the atomicity and
 	// concurrency contract of Supersede is testable without a live database.
 	supersedeFn func(ctx context.Context, params db.SupersedeParams) (string, error)
+
+	// supersedeSearchFn is a seam over the search call resolveSupersedeTarget
+	// uses to find the best prior match for a search-based supersede,
+	// defaulted in New to db.SearchThoughts. It exists so all three branches
+	// (search error, no match, match found) are testable without a live
+	// database.
+	supersedeSearchFn func(ctx context.Context, embedding []float32) ([]model.ThoughtRow, error)
 }
 
 // New creates a Brain with the given dependencies.
@@ -45,6 +52,9 @@ func New(pool *pgxpool.Pool, embedder embeddings.Embedder, cfg *config.Config) *
 	b.captureFn = b.Capture
 	b.supersedeFn = func(ctx context.Context, params db.SupersedeParams) (string, error) {
 		return db.SupersedeCapture(ctx, b.pool, params)
+	}
+	b.supersedeSearchFn = func(ctx context.Context, embedding []float32) ([]model.ThoughtRow, error) {
+		return db.SearchThoughts(ctx, b.pool, embedding, 1, "", nil, 0.3)
 	}
 	return b
 }
@@ -173,9 +183,11 @@ func (b *Brain) Supersede(ctx context.Context, parsed intent.ParsedIntent, sourc
 	if err != nil {
 		return "", err
 	}
-	// No prior thought to supersede: capture the new thought normally.
+	// No prior thought to supersede: capture the new thought normally. Routed
+	// through captureFn (defaulted to Capture in New) rather than Capture
+	// directly, so this fallback branch is testable without a live database.
 	if oldID == "" {
-		return b.Capture(ctx, parsed, source)
+		return b.captureFn(ctx, parsed, source)
 	}
 
 	params := db.SupersedeParams{
@@ -216,7 +228,7 @@ func (b *Brain) resolveSupersedeTarget(ctx context.Context, parsed intent.Parsed
 		}
 	}
 
-	results, err := db.SearchThoughts(ctx, b.pool, searchEmbedding, 1, "", nil, 0.3)
+	results, err := b.supersedeSearchFn(ctx, searchEmbedding)
 	if err != nil {
 		return "", fmt.Errorf("supersede search: %w", err)
 	}
