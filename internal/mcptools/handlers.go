@@ -3,15 +3,18 @@ package mcptools
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 
-	"github.com/windingriverholdings/openbrain/internal/brain"
-	"github.com/windingriverholdings/openbrain/internal/config"
-	"github.com/windingriverholdings/openbrain/internal/intent"
-	"github.com/windingriverholdings/openbrain/internal/pathsec"
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
+	"github.com/windingriverholdings/openbrain/internal/brain"
+	"github.com/windingriverholdings/openbrain/internal/config"
+	"github.com/windingriverholdings/openbrain/internal/db"
+	"github.com/windingriverholdings/openbrain/internal/intent"
+	"github.com/windingriverholdings/openbrain/internal/pathsec"
 )
 
 // mcpCapture routes capture through brain.Capture.
@@ -103,56 +106,40 @@ func mcpDispatch(b *brain.Brain, i intent.Intent) server.ToolHandlerFunc {
 	}
 }
 
-// mcpBulkImport imports multiple thoughts through brain.Capture.
+// mcpBulkImport imports multiple thoughts as one atomic batch through
+// brain.BulkImport: either every thought is saved or none is. A malformed item
+// or a store failure aborts the whole batch and returns an error result, never
+// a success-shaped summary that hides a partial write.
 func mcpBulkImport(b *brain.Brain) server.ToolHandlerFunc {
 	return func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		args := request.GetArguments()
-		thoughts, ok := args["thoughts"].([]any)
+		raw, ok := args["thoughts"].([]any)
 		if !ok {
 			return toolError("thoughts must be an array"), nil
 		}
 		source := stringArg(args, "source", "import")
 
-		var imported, skipped int
-		var errs []string
-		for _, t := range thoughts {
+		items := make([]brain.BulkItem, 0, len(raw))
+		for i, t := range raw {
 			obj, ok := t.(map[string]any)
 			if !ok {
-				skipped++
-				continue
+				return toolError(fmt.Sprintf("thought %d is not an object; nothing was saved", i)), nil
 			}
-
 			content, _ := obj["content"].(string)
-			if content == "" {
-				skipped++
-				continue
-			}
-
 			thoughtType, _ := obj["thought_type"].(string)
-			if thoughtType == "" {
-				thoughtType = intent.InferType(content)
-			}
-
-			parsed := intent.ParsedIntent{
-				Intent:      intent.Capture,
-				Text:        content,
+			items = append(items, brain.BulkItem{
+				Content:     content,
 				ThoughtType: thoughtType,
 				Tags:        stringListFromObj(obj, "tags"),
-			}
-
-			_, err := b.Capture(ctx, parsed, source)
-			if err != nil {
-				errs = append(errs, err.Error())
-				continue
-			}
-			imported++
+			})
 		}
 
-		result := fmt.Sprintf("Imported %d/%d thoughts (%d skipped, %d errors)", imported, len(thoughts), skipped, len(errs))
-		if len(errs) > 0 {
-			result += fmt.Sprintf("\nErrors: %s", strings.Join(errs, "; "))
+		ids, err := b.BulkImport(ctx, items, source)
+		if err != nil {
+			slog.Error("bulk_import tool: store failed", "error", err)
+			return toolError(fmt.Sprintf("bulk import aborted, nothing was saved: %s", sanitizeStoreError(err))), nil
 		}
-		return toolText(result), nil
+		return toolText(fmt.Sprintf("Imported %d thoughts atomically", len(ids))), nil
 	}
 }
 
@@ -182,7 +169,8 @@ func mcpExtract(b *brain.Brain) server.ToolHandlerFunc {
 		parsed := intent.ParsedIntent{Intent: intent.Extract, Text: text, ThoughtType: "note"}
 		result, err := b.DeepCapture(ctx, parsed, source)
 		if err != nil {
-			return toolError(err.Error()), nil
+			slog.Error("extract_thoughts tool: auto-capture failed", "error", err)
+			return toolError(sanitizeStoreError(err)), nil
 		}
 		return toolText(result), nil
 	}
@@ -259,6 +247,32 @@ func extractOnly(ctx context.Context, text string) ([]any, error) {
 		result[i] = c
 	}
 	return result, nil
+}
+
+// sanitizeStoreError reduces an internal write-path error to a caller-safe
+// message, scrubbing raw storage-driver detail (SQLSTATE codes, column and
+// enum names) the same way sanitizeIngestError scrubs filesystem detail. Known
+// sentinel errors defined by this codebase's own domain (batch/content-size
+// caps, empty batch, empty content, empty embedding) carry no internal detail,
+// so their own message is caller-safe and is surfaced as-is; anything else
+// (a raw store or embed failure) collapses to a generic message. Callers log
+// the raw error server-side via slog.Error before calling this, so the detail
+// is never lost, only kept out of the tool response.
+func sanitizeStoreError(err error) string {
+	switch {
+	case errors.Is(err, db.ErrEmptyBatch):
+		return "no thoughts to import: the batch was empty"
+	case errors.Is(err, db.ErrEmptyEmbedding):
+		return "one or more thoughts could not be embedded"
+	case errors.Is(err, brain.ErrEmptyContent):
+		return "one or more thoughts has empty content"
+	case errors.Is(err, brain.ErrBatchTooLarge):
+		return err.Error()
+	case errors.Is(err, brain.ErrContentTooLong):
+		return err.Error()
+	default:
+		return "operation failed: see server log for detail"
+	}
 }
 
 // sanitizeIngestError removes internal path information from error messages.
