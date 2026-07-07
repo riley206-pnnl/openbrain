@@ -232,7 +232,7 @@ After running `setup-mcp.sh`, these tools are available in every Claude Code ses
 | `search_thoughts` | Search OpenBrain for thoughts related to a query |
 | `weekly_review` | Get a review of thoughts from the past N days |
 | `brain_stats` | Return aggregate statistics about the OpenBrain knowledge base |
-| `bulk_import` | Import multiple thoughts at once |
+| `bulk_import` | Import multiple thoughts as one atomic batch; either every thought is saved or none is, and any failure returns an error rather than a partial summary |
 | `supersede_thought` | Capture a new thought and mark an older one as superseded; the capture and the supersede are atomic |
 | `thought_timeline` | Get the timeline of thoughts about a subject |
 | `extract_thoughts` | Extract structured thoughts from long-form text using an LLM |
