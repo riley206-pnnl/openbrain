@@ -1,9 +1,13 @@
 package mcptools
 
 import (
+	"errors"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+
+	"github.com/windingriverholdings/openbrain/internal/brain"
+	"github.com/windingriverholdings/openbrain/internal/db"
 )
 
 func TestStringArgDefault(t *testing.T) {
@@ -148,4 +152,60 @@ func TestSanitizeIngestError_NoPathLeakage(t *testing.T) {
 
 func TestSourceMaxLen(t *testing.T) {
 	assert.Equal(t, 255, sourceMaxLen)
+}
+
+func TestSanitizeStoreError_NoDriverDetailLeakage(t *testing.T) {
+	tests := []struct {
+		name     string
+		err      error
+		contains string
+		absent   string
+	}{
+		{
+			"raw pgx enum error is scrubbed",
+			errors.New(`ERROR: invalid input value for enum thought_type: "bogus" (SQLSTATE 22P02)`),
+			"see server log",
+			"SQLSTATE",
+		},
+		{
+			"empty batch sentinel is caller-safe as-is",
+			db.ErrEmptyBatch,
+			"batch was empty",
+			"",
+		},
+		{
+			"empty embedding sentinel is caller-safe as-is",
+			db.ErrEmptyEmbedding,
+			"could not be embedded",
+			"",
+		},
+		{
+			"empty content sentinel is caller-safe as-is",
+			brain.ErrEmptyContent,
+			"empty content",
+			"",
+		},
+		{
+			"batch too large sentinel carries its own safe detail",
+			brain.ErrBatchTooLarge,
+			"exceeds max items",
+			"",
+		},
+		{
+			"content too long sentinel carries its own safe detail",
+			brain.ErrContentTooLong,
+			"exceeds max length",
+			"",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			sanitized := sanitizeStoreError(tt.err)
+			assert.Contains(t, sanitized, tt.contains)
+			if tt.absent != "" {
+				assert.NotContains(t, sanitized, tt.absent)
+			}
+		})
+	}
 }
