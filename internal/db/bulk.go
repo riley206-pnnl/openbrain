@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -73,11 +74,17 @@ func BulkInsertThoughts(ctx context.Context, p *pgxpool.Pool, inputs []ThoughtIn
 	}
 	// Roll back on a fresh, short-timeout context derived from Background so a
 	// cancelled request ctx cannot leave the connection poisoned. Rollback is a
-	// no-op once the tx has committed, so this defer is safe on both paths.
+	// no-op once the tx has committed, so this defer is safe on both paths:
+	// after a successful commit, Rollback returns pgx.ErrTxClosed, which is
+	// expected and silent. Any OTHER rollback error means the connection may
+	// not have been cleanly released on a real failure path, so it is logged
+	// rather than silently dropped.
 	defer func() {
 		rollbackCtx, cancel := context.WithTimeout(context.Background(), bulkRollbackTimeout)
 		defer cancel()
-		_ = tx.Rollback(rollbackCtx)
+		if rbErr := tx.Rollback(rollbackCtx); rbErr != nil && !errors.Is(rbErr, pgx.ErrTxClosed) {
+			slog.Warn("bulk insert: rollback failed", "error", rbErr)
+		}
 	}()
 
 	ids := make([]string, len(inputs))
