@@ -144,9 +144,12 @@ func effectiveChunkOverlap(cfg *config.Config) int {
 }
 
 // DeepCaptureWithMeta extracts multiple thoughts from a parsed document via LLM,
-// merging file metadata into each captured thought.
+// merging file metadata into each captured thought. Routed through the same
+// b.extractFn seam DeepCapture uses (rather than calling extract.ExtractThoughts
+// directly), so its extraction and store behavior is testable without a live
+// LLM or database, matching DeepCapture's testability.
 func (b *Brain) DeepCaptureWithMeta(ctx context.Context, parsed docparse.ParseResult, source string, meta map[string]any) (string, error) {
-	candidates, err := extract.ExtractThoughts(ctx, parsed.Text)
+	candidates, err := b.extractFn(ctx, parsed.Text)
 	if err != nil {
 		slog.Warn("extraction failed during ingest", "error", err)
 		return "", fmt.Errorf("extract thoughts: %w", err)

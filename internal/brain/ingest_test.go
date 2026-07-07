@@ -2,14 +2,20 @@ package brain
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
 
-	"github.com/windingriverholdings/openbrain/internal/config"
-	"github.com/windingriverholdings/openbrain/internal/docparse"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/windingriverholdings/openbrain/internal/chunker"
+	"github.com/windingriverholdings/openbrain/internal/config"
+	"github.com/windingriverholdings/openbrain/internal/db"
+	"github.com/windingriverholdings/openbrain/internal/docparse"
+	"github.com/windingriverholdings/openbrain/internal/extract"
 )
 
 func TestIngestDocument_DetectsFormat(t *testing.T) {
@@ -257,6 +263,105 @@ func TestIngestDocument_ChunkMetadataIncluded(t *testing.T) {
 	require.NoError(t, err)
 	// Summary should mention chunks (e.g. "5 chunks")
 	assert.Contains(t, result, "chunks")
+}
+
+// TestDeepCaptureWithMeta_StoreFailureIsLoud asserts DeepCaptureWithMeta (used
+// by the document-ingest path, distinct from DeepCapture used by the
+// extract_thoughts tool) propagates a real, typed error when the atomic store
+// of extracted candidates fails, rather than returning a success-shaped
+// string. This pins the same OB-032 fail-loud contract DeepCapture already
+// has, for the sibling entry point captureExtracted also serves.
+func TestDeepCaptureWithMeta_StoreFailureIsLoud(t *testing.T) {
+	b := New(nil, nil, &config.Config{})
+	b.embedder = staticEmbedder{}
+	b.extractFn = func(_ context.Context, _ string) ([]extract.Candidate, error) {
+		return []extract.Candidate{
+			{Content: "candidate one", ThoughtType: "note"},
+			{Content: "candidate two", ThoughtType: "insight"},
+		}, nil
+	}
+	b.bulkInsertFn = func(_ context.Context, _ []db.ThoughtInput) ([]string, error) {
+		return nil, errors.New("injected store failure")
+	}
+
+	parsed := docparse.ParseResult{Text: "long document text", Metadata: map[string]any{}}
+	result, err := b.DeepCaptureWithMeta(context.Background(), parsed, "test", map[string]any{})
+	require.Error(t, err, "a store failure must surface as an error, not a success string")
+	assert.Empty(t, result)
+}
+
+// TestDeepCaptureWithMeta_HappyPath asserts a successful extraction and store
+// still returns the captured-count summary DeepCaptureWithMeta's callers
+// (ingestChunks) rely on to report per-chunk success.
+func TestDeepCaptureWithMeta_HappyPath(t *testing.T) {
+	b := New(nil, nil, &config.Config{})
+	b.embedder = staticEmbedder{}
+	b.extractFn = func(_ context.Context, _ string) ([]extract.Candidate, error) {
+		return []extract.Candidate{{Content: "candidate one", ThoughtType: "note"}}, nil
+	}
+	b.bulkInsertFn = func(_ context.Context, inputs []db.ThoughtInput) ([]string, error) {
+		return []string{"00000001-0000-0000-0000-000000000000"}, nil
+	}
+
+	parsed := docparse.ParseResult{Text: "doc text", Metadata: map[string]any{}}
+	result, err := b.DeepCaptureWithMeta(context.Background(), parsed, "test", map[string]any{})
+	require.NoError(t, err)
+	assert.Contains(t, result, "1 thoughts captured")
+}
+
+// TestIngestChunks_MidDocumentChunkFailureDoesNotAbortSiblings proves
+// per-chunk atomicity is scoped to the CHUNK, not the document: when one
+// chunk's underlying store call fails, that chunk contributes zero captures,
+// but sibling chunks in the same document are processed independently and
+// still succeed. This is the direct consequence of captureExtracted now being
+// atomic-or-rollback per DeepCaptureWithMeta call: a failing chunk can no
+// longer leave a partial set of its own candidates captured, but it also must
+// not prevent unrelated sibling chunks from capturing. ingestChunks' own
+// partial-success summary format ("N/M chunks captured") is pre-existing
+// behavior and intentionally left unchanged here (OB-032 scope boundary).
+func TestIngestChunks_MidDocumentChunkFailureDoesNotAbortSiblings(t *testing.T) {
+	b := New(nil, nil, &config.Config{})
+	b.embedder = staticEmbedder{}
+	// One extracted candidate per chunk, equal to the chunk's own text, so the
+	// test can tell which chunk produced which stored content.
+	b.extractFn = func(_ context.Context, text string) ([]extract.Candidate, error) {
+		return []extract.Candidate{{Content: text, ThoughtType: "note"}}, nil
+	}
+
+	var mu sync.Mutex
+	var stored []string
+	b.bulkInsertFn = func(_ context.Context, inputs []db.ThoughtInput) ([]string, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		for _, in := range inputs {
+			if strings.Contains(in.Content, "BOOM") {
+				return nil, errors.New("injected mid-document chunk store failure")
+			}
+		}
+		ids := make([]string, len(inputs))
+		for i, in := range inputs {
+			ids[i] = "id"
+			stored = append(stored, in.Content)
+		}
+		return ids, nil
+	}
+
+	chunks := []chunker.Chunk{
+		{Text: "chunk zero ok", Index: 0, Total: 3},
+		{Text: "chunk one BOOM must fail to store", Index: 1, Total: 3},
+		{Text: "chunk two ok", Index: 2, Total: 3},
+	}
+
+	result, err := b.ingestChunks(context.Background(), chunks, nil, "doc.txt", "test", map[string]any{})
+	require.NoError(t, err, "one failed chunk must not fail the whole document when siblings succeed")
+	assert.Contains(t, result, "2/3 chunks captured")
+
+	mu.Lock()
+	defer mu.Unlock()
+	assert.Len(t, stored, 2, "exactly the two non-failing chunks' content must be persisted")
+	for _, c := range stored {
+		assert.NotContains(t, c, "BOOM", "the failed chunk's content must never be persisted")
+	}
 }
 
 func TestTruncate_RuneSafe(t *testing.T) {
