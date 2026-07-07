@@ -130,9 +130,18 @@ func TestBulkInsertThoughts_EmptyEmbedding(t *testing.T) {
 	assert.Equal(t, 0, total, "no row may be written when one item has an empty embedding")
 }
 
+// concurrentBatchThoughtTypes assigns a distinct enum value per batch index so
+// TestBulkInsertThoughts_ConcurrentBatches can detect a torn record: a
+// concurrent write bug that attaches one batch's rows to a different batch's
+// field values would show up as a content/thought_type mismatch, not just a
+// wrong aggregate count.
+var concurrentBatchThoughtTypes = []string{"note", "insight", "idea", "decision", "memory"}
+
 // TestBulkInsertThoughts_ConcurrentBatches runs several batches against the
-// same source concurrently and asserts no write is lost or torn: the final live
-// count equals the exact sum of every committed batch.
+// same source concurrently and asserts no write is lost or torn: the final
+// live count equals the exact sum of every committed batch, AND every row's
+// own content and thought_type still agree with each other (a real torn-record
+// check), not merely the aggregate count.
 func TestBulkInsertThoughts_ConcurrentBatches(t *testing.T) {
 	pool := integrationPool(t)
 	ctx := context.Background()
@@ -150,12 +159,13 @@ func TestBulkInsertThoughts_ConcurrentBatches(t *testing.T) {
 		wg.Add(1)
 		go func(b int) {
 			defer wg.Done()
+			thoughtType := concurrentBatchThoughtTypes[b%len(concurrentBatchThoughtTypes)]
 			inputs := make([]ThoughtInput, perBatch)
 			for i := 0; i < perBatch; i++ {
 				inputs[i] = ThoughtInput{
 					Content:     fmt.Sprintf("batch %d item %d", b, i),
 					Embedding:   testEmbedding,
-					ThoughtType: "note",
+					ThoughtType: thoughtType,
 					Source:      source,
 				}
 			}
@@ -171,4 +181,32 @@ func TestBulkInsertThoughts_ConcurrentBatches(t *testing.T) {
 	require.Empty(t, failures, "no concurrent batch should fail: %v", failures)
 	assert.Equal(t, batches*perBatch, liveCountBySource(t, pool, source),
 		"every concurrent batch must fully persist with no lost or torn writes")
+
+	// Torn-record check: every row's own thought_type must match the batch
+	// encoded in its own content. A torn write (rows from one batch's
+	// transaction ending up paired with another batch's field values) would
+	// pass the aggregate live-count assertion above but fail here.
+	rows, err := pool.Query(ctx,
+		`SELECT content, thought_type::text FROM thoughts WHERE source = $1`, source)
+	require.NoError(t, err)
+	defer rows.Close()
+
+	seen := map[string]bool{}
+	for rows.Next() {
+		var content, thoughtType string
+		require.NoError(t, rows.Scan(&content, &thoughtType))
+
+		var batchIdx, itemIdx int
+		_, scanErr := fmt.Sscanf(content, "batch %d item %d", &batchIdx, &itemIdx)
+		require.NoError(t, scanErr, "unexpected content shape: %q", content)
+
+		expectedType := concurrentBatchThoughtTypes[batchIdx%len(concurrentBatchThoughtTypes)]
+		assert.Equal(t, expectedType, thoughtType,
+			"row %q has thought_type %q, expected %q for its own batch: torn record",
+			content, thoughtType, expectedType)
+		seen[content] = true
+	}
+	require.NoError(t, rows.Err())
+	assert.Len(t, seen, batches*perBatch,
+		"every batch/item combination must appear exactly once with no duplicates")
 }
