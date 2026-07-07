@@ -68,6 +68,25 @@ func New(pool *pgxpool.Pool, embedder embeddings.Embedder, cfg *config.Config) *
 	return b
 }
 
+// SetSeamsForTesting overrides the extract and bulk-insert seams from test
+// code in OTHER packages (e.g. internal/mcptools), so the MCP handler layer
+// can be exercised without a live LLM or database. A nil argument leaves the
+// corresponding seam untouched. Production code must never call this: it
+// exists solely so handler tests can inject the same deterministic
+// extract/store behavior that this package's own tests already reach via the
+// unexported extractFn/bulkInsertFn fields.
+func (b *Brain) SetSeamsForTesting(
+	extractFn func(ctx context.Context, text string) ([]extract.Candidate, error),
+	bulkInsertFn func(ctx context.Context, inputs []db.ThoughtInput) ([]string, error),
+) {
+	if extractFn != nil {
+		b.extractFn = extractFn
+	}
+	if bulkInsertFn != nil {
+		b.bulkInsertFn = bulkInsertFn
+	}
+}
+
 // Dispatch routes a parsed intent to the appropriate handler.
 func (b *Brain) Dispatch(ctx context.Context, parsed intent.ParsedIntent, source string) (string, error) {
 	switch parsed.Intent {
