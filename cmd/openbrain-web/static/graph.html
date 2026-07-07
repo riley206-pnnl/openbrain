@@ -1,0 +1,584 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1.0"/>
+  <title>OpenBrain — Brain Map</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    :root {
+      /* ── app design tokens (match index.html) ── */
+      --bg:         #0f1117;
+      --surface:    #1a1d27;
+      --surface2:   #22263a;
+      --border:     #2e3350;
+      --accent:     #6c8ef5;
+      --accent-dim: #3d4f8a;
+      --text:       #e2e4f0;
+      --text-dim:   #7b82a8;
+      --green:      #4ade80;
+      --red:        #f87171;
+      --radius:     10px;
+      --font:       'Inter', system-ui, sans-serif;
+      --mono:       'JetBrains Mono', 'Fira Code', monospace;
+      /* ── cluster colors (validated dark categorical set) ── */
+      --c0: #3987e5;
+      --c1: #199e70;
+      --c2: #c98500;
+      --c3: #008300;
+      --c4: #9085e9;
+      --c5: #e66767;
+      --c6: #d55181;
+      --c7: #d95926;
+      --c-noise: #52514e;
+    }
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: var(--font);
+      font-size: 14px;
+      height: 100dvh;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+
+    /* ── header (mirrors index.html) ── */
+    header {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 14px 20px;
+      background: var(--surface);
+      border-bottom: 1px solid var(--border);
+      flex-shrink: 0;
+    }
+    header h1 { font-size: 1.1rem; font-weight: 600; }
+    .back-link {
+      font-size: 0.8rem;
+      color: var(--text-dim);
+      text-decoration: none;
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      padding: 3px 8px;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      transition: border-color 0.15s, color 0.15s;
+    }
+    .back-link:hover { border-color: var(--accent-dim); color: var(--text); }
+    .header-stats {
+      margin-left: auto;
+      font-size: 0.75rem;
+      color: var(--text-dim);
+    }
+
+    /* ── controls bar ── */
+    .controls {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 8px 20px;
+      background: var(--surface);
+      border-bottom: 1px solid var(--border);
+      flex-shrink: 0;
+      flex-wrap: wrap;
+    }
+    .btn {
+      background: transparent;
+      border: 1px solid var(--border);
+      color: var(--text-dim);
+      border-radius: 6px;
+      padding: 4px 10px;
+      font-size: 0.75rem;
+      font-family: var(--font);
+      cursor: pointer;
+      transition: border-color 0.15s, color 0.15s;
+    }
+    .btn:hover { border-color: var(--accent-dim); color: var(--text); }
+    .btn.active { border-color: var(--accent); color: var(--accent); }
+    .controls label {
+      font-size: 0.75rem;
+      color: var(--text-dim);
+      display: flex;
+      align-items: center;
+      gap: 5px;
+      cursor: pointer;
+    }
+    .controls input[type=range] { width: 70px; accent-color: var(--accent); }
+    .sep { width: 1px; height: 16px; background: var(--border); }
+
+    /* ── main area ── */
+    .main {
+      flex: 1 1 auto;
+      display: flex;
+      overflow: hidden;
+      min-height: 0;
+    }
+
+    /* ── canvas ── */
+    #canvas-wrap {
+      flex: 1 1 auto;
+      position: relative;
+      overflow: hidden;
+      cursor: grab;
+    }
+    #canvas-wrap.panning { cursor: grabbing; }
+    #brain-canvas { position: absolute; inset: 0; }
+
+    /* ── legend sidebar ── */
+    #legend {
+      flex: 0 0 200px;
+      overflow-y: auto;
+      padding: 14px 12px;
+      background: var(--surface);
+      border-left: 1px solid var(--border);
+    }
+    #legend h2 {
+      font-size: 0.7rem;
+      text-transform: uppercase;
+      letter-spacing: 0.07em;
+      color: var(--text-dim);
+      margin-bottom: 10px;
+    }
+    .legend-item {
+      display: flex;
+      align-items: flex-start;
+      gap: 8px;
+      margin-bottom: 8px;
+      cursor: pointer;
+      padding: 4px 5px;
+      border-radius: 6px;
+      transition: background 0.1s;
+    }
+    .legend-item:hover { background: var(--surface2); }
+    .legend-item.dimmed { opacity: 0.3; }
+    .legend-dot {
+      flex: 0 0 9px;
+      width: 9px; height: 9px;
+      border-radius: 50%;
+      margin-top: 3px;
+    }
+    .legend-label { font-size: 0.78rem; color: var(--text); line-height: 1.35; }
+    .legend-count { font-size: 0.68rem; color: var(--text-dim); }
+
+    /* ── type pills ── */
+    #type-filter {
+      padding: 7px 20px;
+      background: var(--surface);
+      border-top: 1px solid var(--border);
+      display: flex;
+      gap: 6px;
+      flex-wrap: wrap;
+      flex-shrink: 0;
+    }
+    .type-pill {
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 2px 10px;
+      font-size: 0.72rem;
+      font-family: var(--font);
+      cursor: pointer;
+      color: var(--text-dim);
+      background: transparent;
+      transition: border-color 0.12s, color 0.12s;
+      user-select: none;
+    }
+    .type-pill.active { border-color: var(--accent-dim); color: var(--text); }
+
+    /* ── tooltip ── */
+    #tooltip {
+      position: fixed;
+      background: var(--surface2);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 9px 12px;
+      max-width: 290px;
+      pointer-events: none;
+      opacity: 0;
+      transition: opacity 0.1s;
+      z-index: 100;
+      font-size: 0.78rem;
+      line-height: 1.5;
+    }
+    #tooltip.visible { opacity: 1; }
+    .tt-meta {
+      font-size: 0.68rem;
+      color: var(--text-dim);
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      margin-bottom: 4px;
+    }
+    .tt-text { color: var(--text); margin-bottom: 4px; }
+    .tt-cluster { font-size: 0.7rem; }
+
+    /* ── loading / empty states ── */
+    #state-overlay {
+      position: absolute;
+      inset: 0;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 10px;
+      color: var(--text-dim);
+      font-size: 0.85rem;
+      pointer-events: none;
+    }
+    #state-overlay .icon { font-size: 2rem; opacity: 0.4; }
+    #state-overlay p { max-width: 300px; text-align: center; line-height: 1.6; }
+    #state-overlay code {
+      font-family: var(--mono);
+      background: var(--surface2);
+      padding: 2px 6px;
+      border-radius: 4px;
+      font-size: 0.8rem;
+    }
+    #state-overlay.hidden { display: none; }
+  </style>
+</head>
+<body>
+
+<header>
+  <span aria-hidden="true">🧠</span>
+  <h1>Brain Map</h1>
+  <a href="/" class="back-link">← Chat</a>
+  <span class="header-stats" id="header-stats"></span>
+</header>
+
+<div class="controls">
+  <button class="btn active" id="btn-edges">Edges</button>
+  <button class="btn active" id="btn-labels">Labels</button>
+  <div class="sep"></div>
+  <label>
+    Node size
+    <input type="range" id="node-size" min="2" max="10" value="5" step="0.5"/>
+  </label>
+  <div class="sep"></div>
+  <button class="btn" id="btn-reset" title="Double-click canvas to reset too">Reset view</button>
+</div>
+
+<div class="main">
+  <div id="canvas-wrap">
+    <canvas id="brain-canvas"></canvas>
+    <div id="state-overlay">
+      <div class="icon">🧠</div>
+      <p id="state-msg">Loading brain map…</p>
+    </div>
+  </div>
+  <aside id="legend">
+    <h2>Brain regions</h2>
+    <div id="legend-items"></div>
+  </aside>
+</div>
+
+<div id="type-filter"></div>
+<div id="tooltip"></div>
+
+<script>
+'use strict';
+
+const CLUSTER_COLORS = [
+  '#3987e5','#199e70','#c98500','#008300',
+  '#9085e9','#e66767','#d55181','#d95926',
+];
+const NOISE_COLOR = '#52514e';
+const TYPE_ICONS = {
+  decision:'⚖️', insight:'💡', person:'👤', meeting:'📅',
+  idea:'🔮', note:'📝', memory:'🔁',
+};
+
+function clusterColor(cid) {
+  return cid < 0 ? NOISE_COLOR : CLUSTER_COLORS[cid % CLUSTER_COLORS.length];
+}
+
+function esc(s) {
+  return String(s)
+    .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+// ── state ─────────────────────────────────────────────────────────────────────
+let DATA = null;
+let showEdges = true;
+let showLabels = true;
+let nodeR = 5;
+let hiddenClusters = new Set();
+let activeTypes = new Set();
+let transform = { x: 0, y: 0, k: 1 };
+let hoveredNode = null;
+let drag = null;
+
+// ── canvas ────────────────────────────────────────────────────────────────────
+const wrap   = document.getElementById('canvas-wrap');
+const canvas = document.getElementById('brain-canvas');
+const ctx    = canvas.getContext('2d');
+let W = 0, H = 0;
+
+function resize() {
+  const dpr = window.devicePixelRatio || 1;
+  W = wrap.clientWidth;
+  H = wrap.clientHeight;
+  canvas.width  = W * dpr;
+  canvas.height = H * dpr;
+  canvas.style.width  = W + 'px';
+  canvas.style.height = H + 'px';
+  ctx.scale(dpr, dpr);
+  if (DATA) render();
+}
+
+// ── coordinate mapping ────────────────────────────────────────────────────────
+const PAD = 60;
+
+function toScreen(ux, uy) {
+  const [xMin, xMax, yMin, yMax] = DATA.meta.bounds;
+  const sx = PAD + (ux - xMin) / (xMax - xMin) * (W - 2 * PAD);
+  const sy = PAD + (uy - yMin) / (yMax - yMin) * (H - 2 * PAD);
+  return [transform.x + sx * transform.k, transform.y + sy * transform.k];
+}
+
+// ── visibility ────────────────────────────────────────────────────────────────
+function visible(n) {
+  return !hiddenClusters.has(n.cluster) && activeTypes.has(n.type);
+}
+
+// ── render ────────────────────────────────────────────────────────────────────
+function render() {
+  ctx.clearRect(0, 0, W, H);
+  if (!DATA || !DATA.nodes.length) return;
+
+  if (showEdges) {
+    for (const e of DATA.edges) {
+      const na = DATA.nodes[e.s], nb = DATA.nodes[e.t];
+      if (!visible(na) || !visible(nb)) continue;
+      const [ax, ay] = toScreen(na.x, na.y);
+      const [bx, by] = toScreen(nb.x, nb.y);
+      ctx.beginPath();
+      ctx.moveTo(ax, ay);
+      ctx.lineTo(bx, by);
+      ctx.strokeStyle = `rgba(110,142,245,${(e.w - 0.5) * 0.22})`;
+      ctx.lineWidth = 0.7;
+      ctx.stroke();
+    }
+  }
+
+  for (const n of DATA.nodes) {
+    if (!visible(n)) continue;
+    const [sx, sy] = toScreen(n.x, n.y);
+    const r = hoveredNode === n ? nodeR * 1.7 : nodeR;
+    ctx.beginPath();
+    ctx.arc(sx, sy, r, 0, 2 * Math.PI);
+    ctx.fillStyle = clusterColor(n.cluster);
+    ctx.globalAlpha = hoveredNode && hoveredNode !== n ? 0.35 : 0.82;
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(15,17,23,0.8)';
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+    ctx.globalAlpha = 1;
+  }
+
+  if (showLabels) {
+    ctx.font = 'bold 11px Inter, system-ui, sans-serif';
+    ctx.textAlign = 'center';
+    for (const cl of DATA.clusters) {
+      if (cl.id < 0 || hiddenClusters.has(cl.id)) continue;
+      const [cx, cy] = toScreen(cl.cx, cl.cy);
+      const tw = ctx.measureText(cl.label).width;
+      ctx.fillStyle = 'rgba(15,17,23,0.82)';
+      ctx.beginPath();
+      ctx.roundRect(cx - tw / 2 - 6, cy - 9, tw + 12, 18, 4);
+      ctx.fill();
+      ctx.fillStyle = clusterColor(cl.id);
+      ctx.fillText(cl.label, cx, cy + 4);
+    }
+  }
+}
+
+// ── tooltip ───────────────────────────────────────────────────────────────────
+const tooltip = document.getElementById('tooltip');
+
+function showTooltip(n, px, py) {
+  const cl = DATA.clusters.find(c => c.id === n.cluster);
+  const clLabel = cl ? cl.label : 'Unclustered';
+  const col = clusterColor(n.cluster);
+  const preview = (n.summary || n.content).slice(0, 220) +
+    ((n.summary || n.content).length > 220 ? '…' : '');
+  tooltip.innerHTML =
+    `<div class="tt-meta">${esc(n.type)}${n.tags.length ? ' · ' + n.tags.slice(0,3).map(esc).join(', ') : ''}</div>` +
+    `<div class="tt-text">${esc(preview)}</div>` +
+    `<div class="tt-cluster" style="color:${col}">◉ ${esc(clLabel)}</div>`;
+  let tx = px + 14, ty = py - 10;
+  if (tx + 310 > window.innerWidth) tx = px - 310;
+  if (ty + 120 > window.innerHeight) ty = py - 120;
+  tooltip.style.left = tx + 'px';
+  tooltip.style.top  = ty + 'px';
+  tooltip.classList.add('visible');
+}
+
+function hideTooltip() { tooltip.classList.remove('visible'); }
+
+// ── hit test ──────────────────────────────────────────────────────────────────
+function hitTest(px, py) {
+  let best = null, bestD2 = (nodeR * 5) ** 2;
+  for (const n of DATA.nodes) {
+    if (!visible(n)) continue;
+    const [sx, sy] = toScreen(n.x, n.y);
+    const d2 = (px - sx) ** 2 + (py - sy) ** 2;
+    if (d2 < bestD2) { bestD2 = d2; best = n; }
+  }
+  return best;
+}
+
+// ── mouse ─────────────────────────────────────────────────────────────────────
+canvas.addEventListener('mousemove', e => {
+  if (!DATA) return;
+  const rect = canvas.getBoundingClientRect();
+  const px = e.clientX - rect.left, py = e.clientY - rect.top;
+  if (drag) {
+    transform.x += e.movementX;
+    transform.y += e.movementY;
+    render(); return;
+  }
+  const hit = hitTest(px, py);
+  if (hit !== hoveredNode) { hoveredNode = hit; render(); }
+  if (hit) showTooltip(hit, e.clientX, e.clientY);
+  else hideTooltip();
+});
+
+canvas.addEventListener('mousedown', () => {
+  drag = true; wrap.classList.add('panning');
+});
+canvas.addEventListener('mouseup', () => {
+  drag = false; wrap.classList.remove('panning');
+});
+canvas.addEventListener('mouseleave', () => {
+  drag = false; wrap.classList.remove('panning');
+  hoveredNode = null; hideTooltip(); if (DATA) render();
+});
+canvas.addEventListener('wheel', e => {
+  if (!DATA) return;
+  e.preventDefault();
+  const f = e.deltaY > 0 ? 0.88 : 1.14;
+  const rect = canvas.getBoundingClientRect();
+  const mx = e.clientX - rect.left, my = e.clientY - rect.top;
+  transform.x = mx + (transform.x - mx) * f;
+  transform.y = my + (transform.y - my) * f;
+  transform.k *= f;
+  render();
+}, { passive: false });
+
+function resetView() {
+  transform = { x: 0, y: 0, k: 1 };
+  if (DATA) render();
+}
+canvas.addEventListener('dblclick', resetView);
+document.getElementById('btn-reset').addEventListener('click', resetView);
+
+// ── legend ────────────────────────────────────────────────────────────────────
+function buildLegend() {
+  const container = document.getElementById('legend-items');
+  container.innerHTML = '';
+  for (const cl of DATA.clusters) {
+    const div = document.createElement('div');
+    div.className = 'legend-item';
+    div.innerHTML =
+      `<span class="legend-dot" style="background:${clusterColor(cl.id)}"></span>` +
+      `<span><span class="legend-label">${esc(cl.label)}</span><br>` +
+      `<span class="legend-count">${cl.size} thoughts</span></span>`;
+    div.addEventListener('click', () => {
+      if (hiddenClusters.has(cl.id)) hiddenClusters.delete(cl.id);
+      else hiddenClusters.add(cl.id);
+      div.classList.toggle('dimmed');
+      render();
+    });
+    container.appendChild(div);
+  }
+}
+
+// ── type pills ────────────────────────────────────────────────────────────────
+function buildTypePills() {
+  const bar = document.getElementById('type-filter');
+  bar.innerHTML = '';
+  for (const tp of DATA.meta.thought_types) {
+    const btn = document.createElement('button');
+    btn.className = 'type-pill active';
+    btn.textContent = (TYPE_ICONS[tp] || '') + ' ' + tp;
+    btn.dataset.type = tp;
+    btn.addEventListener('click', () => {
+      if (activeTypes.has(tp)) {
+        if (activeTypes.size === 1) return;
+        activeTypes.delete(tp);
+        btn.classList.remove('active');
+      } else {
+        activeTypes.add(tp);
+        btn.classList.add('active');
+      }
+      render();
+    });
+    bar.appendChild(btn);
+  }
+}
+
+// ── buttons ───────────────────────────────────────────────────────────────────
+document.getElementById('btn-edges').addEventListener('click', function() {
+  showEdges = !showEdges;
+  this.classList.toggle('active', showEdges);
+  render();
+});
+document.getElementById('btn-labels').addEventListener('click', function() {
+  showLabels = !showLabels;
+  this.classList.toggle('active', showLabels);
+  render();
+});
+document.getElementById('node-size').addEventListener('input', function() {
+  nodeR = +this.value; render();
+});
+
+// ── state overlay ─────────────────────────────────────────────────────────────
+const overlay = document.getElementById('state-overlay');
+const stateMsg = document.getElementById('state-msg');
+
+function showState(msg) {
+  stateMsg.innerHTML = msg;
+  overlay.classList.remove('hidden');
+}
+function hideState() { overlay.classList.add('hidden'); }
+
+// ── load data ─────────────────────────────────────────────────────────────────
+async function loadData() {
+  try {
+    const res = await fetch('/brain.json');
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    DATA = await res.json();
+
+    if (!DATA.nodes || DATA.nodes.length === 0) {
+      showState(
+        'No brain map data yet.<br>' +
+        'Run <code>make viz</code> from the repo root to generate it,<br>' +
+        'then rebuild and restart the server.'
+      );
+      return;
+    }
+
+    activeTypes = new Set(DATA.meta.thought_types);
+    hideState();
+    buildLegend();
+    buildTypePills();
+
+    const m = DATA.meta;
+    document.getElementById('header-stats').textContent =
+      `${m.n_thoughts} thoughts · ${m.n_clusters} regions · ${m.n_edges} connections`;
+
+    resize();
+  } catch (err) {
+    showState(
+      `Failed to load brain.json: ${esc(err.message)}<br>` +
+      'Run <code>make viz</code> and rebuild the server.'
+    );
+  }
+}
+
+window.addEventListener('resize', resize);
+loadData();
+</script>
+</body>
+</html>

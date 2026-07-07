@@ -20,7 +20,7 @@ VERSION     := $(shell git describe --tags --always 2>/dev/null || echo dev)
 go_ldflags = -X $(VERSION_PKG).Version=$(1)
 LDFLAGS    := $(call go_ldflags,$(VERSION))
 
-.PHONY: all build build-ocr dist test test-cover test-verbose lint vet clean install fixtures setup-db
+.PHONY: all build build-ocr dist test test-cover test-verbose lint vet clean install fixtures setup-db viz
 
 ## Default: show help
 all: help
@@ -101,6 +101,10 @@ fixtures:
 setup-db:
 	bash scripts/setup-db.sh
 
+## Generate brain map data (runs UMAP + clustering + LLM labels, writes brain.json)
+viz:
+	python3 scripts/build-brain-viz.py
+
 ## Install binaries to GOPATH/bin
 install:
 	$(GO) install -ldflags "$(LDFLAGS)" ./cmd/openbrain
@@ -137,6 +141,7 @@ help:
 	@echo "  make ci            Full CI (lint + coverage)"
 	@echo "  make fixtures      Regenerate test fixtures from Python"
 	@echo "  make setup-db      Run database migrations"
+	@echo "  make viz           Generate brain map data (brain.json)"
 	@echo "  make install       Install binaries to GOPATH"
 	@echo "  make clean         Remove build artifacts"
 	@echo "  make sizes         Show binary sizes"

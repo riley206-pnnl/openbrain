@@ -72,6 +72,9 @@ func serveHTTP(ctx context.Context, cfg *config.Config, b *brain.Brain, embedder
 		return fmt.Errorf("static fs: %w", err)
 	}
 	mux.Handle("/", http.FileServer(http.FS(staticSub)))
+	mux.HandleFunc("/graph", func(w http.ResponseWriter, r *http.Request) {
+		http.ServeFileFS(w, r, staticSub, "graph.html")
+	})
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		fmt.Fprint(w, "ok")
