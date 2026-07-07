@@ -43,6 +43,12 @@ type Brain struct {
 	// (search error, no match, match found) are testable without a live
 	// database.
 	supersedeSearchFn func(ctx context.Context, embedding []float32) ([]model.ThoughtRow, error)
+
+	// bulkInsertFn is a seam over the atomic multi-thought insert, defaulted in
+	// New to db.BulkInsertThoughts. It backs both BulkImport and the
+	// extract-then-auto_capture path, so their all-or-nothing contract is
+	// testable without a live database.
+	bulkInsertFn func(ctx context.Context, inputs []db.ThoughtInput) ([]string, error)
 }
 
 // New creates a Brain with the given dependencies.
@@ -55,6 +61,9 @@ func New(pool *pgxpool.Pool, embedder embeddings.Embedder, cfg *config.Config) *
 	}
 	b.supersedeSearchFn = func(ctx context.Context, embedding []float32) ([]model.ThoughtRow, error) {
 		return db.SearchThoughts(ctx, b.pool, embedding, 1, "", nil, 0.3)
+	}
+	b.bulkInsertFn = func(ctx context.Context, inputs []db.ThoughtInput) ([]string, error) {
+		return db.BulkInsertThoughts(ctx, b.pool, inputs)
 	}
 	return b
 }
@@ -260,8 +269,11 @@ func (b *Brain) DeepCapture(ctx context.Context, parsed intent.ParsedIntent, sou
 		return b.captureFn(ctx, parsed, source)
 	}
 
-	captured, errs := captureExtracted(ctx, b, candidates, source, nil)
-	return fmt.Sprintf("Extracted %d thoughts: %s", len(captured), formatCaptureResult(captured, errs)), nil
+	captured, err := captureExtracted(ctx, b, candidates, source, nil)
+	if err != nil {
+		return "", fmt.Errorf("deep capture: %w", err)
+	}
+	return fmt.Sprintf("Captured %d thoughts: %s", len(captured), strings.Join(captured, ", ")), nil
 }
 
 // --- Formatting helpers (text output for CLI/chat) ---

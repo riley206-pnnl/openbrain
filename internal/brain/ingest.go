@@ -165,44 +165,69 @@ func (b *Brain) DeepCaptureWithMeta(ctx context.Context, parsed docparse.ParseRe
 		}
 	}
 
-	captured, errs := captureExtracted(ctx, b, candidates, source, merged)
+	captured, err := captureExtracted(ctx, b, candidates, source, merged)
+	if err != nil {
+		return "", err
+	}
 
-	return formatCaptureResult(captured, errs), nil
+	return fmt.Sprintf("%d thoughts captured: %s", len(captured), strings.Join(captured, ", ")), nil
 }
 
 // captureExtracted is the shared core for DeepCapture and DeepCaptureWithMeta.
-// It embeds and stores each candidate, linking subjects as needed.
-func captureExtracted(ctx context.Context, b *Brain, candidates []extract.Candidate, source string, metadata map[string]any) ([]string, []string) {
-	var captured []string
-	var errs []string
+// It embeds every candidate, then stores the whole set in ONE atomic
+// transaction: either all extracted thoughts persist or none do. An embed
+// failure or a store failure returns a typed error with no partial write, so
+// extract-then-auto_capture can never leave a partial batch behind. Subject
+// links are applied best-effort after the atomic thought-write commits; their
+// error-handling policy is owned by OB-023 and deliberately left unchanged
+// here. It returns a per-thought label list on success.
+func captureExtracted(ctx context.Context, b *Brain, candidates []extract.Candidate, source string, metadata map[string]any) ([]string, error) {
+	if len(candidates) == 0 {
+		return nil, nil
+	}
 
-	for _, c := range candidates {
+	inputs := make([]db.ThoughtInput, len(candidates))
+	for i, c := range candidates {
 		embedding, err := b.embedder.Embed(ctx, c.Content)
 		if err != nil {
-			errs = append(errs, fmt.Sprintf("embed %q: %v", truncate(c.Content, 30), err))
-			continue
+			return nil, fmt.Errorf("embed %q: %w", truncate(c.Content, 30), err)
 		}
-
-		id, err := db.InsertThought(ctx, b.pool, c.Content, embedding, c.ThoughtType, c.Tags, source, nil, metadata)
-		if err != nil {
-			errs = append(errs, fmt.Sprintf("insert: %v", err))
-			continue
+		inputs[i] = db.ThoughtInput{
+			Content:     c.Content,
+			Embedding:   embedding,
+			ThoughtType: c.ThoughtType,
+			Tags:        c.Tags,
+			Source:      source,
+			Metadata:    metadata,
 		}
+	}
 
+	ids, err := b.bulkInsertFn(ctx, inputs)
+	if err != nil {
+		slog.Error("extract auto-capture failed",
+			"candidates", len(candidates), "source", source, "error", err)
+		return nil, fmt.Errorf("auto-capture extracted thoughts: %w", err)
+	}
+
+	// Subject links run after the atomic thought-write has committed. A link
+	// failure is logged but does not fail the capture: the LinkSubjects
+	// error-handling contract belongs to OB-023, out of scope here. The core
+	// thought-write above is atomic and fail-loud regardless.
+	labels := make([]string, len(ids))
+	for i, id := range ids {
+		labels[i] = fmt.Sprintf("[%s] %s", candidates[i].ThoughtType, db.ShortID(id))
 		var subjects []model.SubjectLink
-		for _, s := range c.Subjects {
+		for _, s := range candidates[i].Subjects {
 			subjects = append(subjects, model.SubjectLink{Name: s, Type: "concept"})
 		}
 		if len(subjects) > 0 {
 			if err := db.LinkSubjects(ctx, b.pool, id, subjects); err != nil {
-				slog.Warn("failed to link subjects", "error", err)
+				slog.Warn("failed to link subjects", "thought", db.ShortID(id), "error", err)
 			}
 		}
-
-		captured = append(captured, fmt.Sprintf("[%s] %s", c.ThoughtType, id[:8]))
 	}
 
-	return captured, errs
+	return labels, nil
 }
 
 // appendAutoTags returns new candidates with autoTags appended and deduplicated.
@@ -231,15 +256,6 @@ func appendAutoTags(candidates []extract.Candidate, autoTags []string) []extract
 			Subjects:        c.Subjects,
 			SupersedesQuery: c.SupersedesQuery,
 		}
-	}
-	return result
-}
-
-// formatCaptureResult builds a human-readable summary of captured thoughts.
-func formatCaptureResult(captured, errs []string) string {
-	result := fmt.Sprintf("%d thoughts captured: %s", len(captured), strings.Join(captured, ", "))
-	if len(errs) > 0 {
-		result += fmt.Sprintf("\n%d errors: %s", len(errs), strings.Join(errs, "; "))
 	}
 	return result
 }

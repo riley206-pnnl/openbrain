@@ -6,12 +6,12 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/mark3labs/mcp-go/mcp"
+	"github.com/mark3labs/mcp-go/server"
 	"github.com/windingriverholdings/openbrain/internal/brain"
 	"github.com/windingriverholdings/openbrain/internal/config"
 	"github.com/windingriverholdings/openbrain/internal/intent"
 	"github.com/windingriverholdings/openbrain/internal/pathsec"
-	"github.com/mark3labs/mcp-go/mcp"
-	"github.com/mark3labs/mcp-go/server"
 )
 
 // mcpCapture routes capture through brain.Capture.
@@ -103,56 +103,39 @@ func mcpDispatch(b *brain.Brain, i intent.Intent) server.ToolHandlerFunc {
 	}
 }
 
-// mcpBulkImport imports multiple thoughts through brain.Capture.
+// mcpBulkImport imports multiple thoughts as one atomic batch through
+// brain.BulkImport: either every thought is saved or none is. A malformed item
+// or a store failure aborts the whole batch and returns an error result, never
+// a success-shaped summary that hides a partial write.
 func mcpBulkImport(b *brain.Brain) server.ToolHandlerFunc {
 	return func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		args := request.GetArguments()
-		thoughts, ok := args["thoughts"].([]any)
+		raw, ok := args["thoughts"].([]any)
 		if !ok {
 			return toolError("thoughts must be an array"), nil
 		}
 		source := stringArg(args, "source", "import")
 
-		var imported, skipped int
-		var errs []string
-		for _, t := range thoughts {
+		items := make([]brain.BulkItem, 0, len(raw))
+		for i, t := range raw {
 			obj, ok := t.(map[string]any)
 			if !ok {
-				skipped++
-				continue
+				return toolError(fmt.Sprintf("thought %d is not an object; nothing was saved", i)), nil
 			}
-
 			content, _ := obj["content"].(string)
-			if content == "" {
-				skipped++
-				continue
-			}
-
 			thoughtType, _ := obj["thought_type"].(string)
-			if thoughtType == "" {
-				thoughtType = intent.InferType(content)
-			}
-
-			parsed := intent.ParsedIntent{
-				Intent:      intent.Capture,
-				Text:        content,
+			items = append(items, brain.BulkItem{
+				Content:     content,
 				ThoughtType: thoughtType,
 				Tags:        stringListFromObj(obj, "tags"),
-			}
-
-			_, err := b.Capture(ctx, parsed, source)
-			if err != nil {
-				errs = append(errs, err.Error())
-				continue
-			}
-			imported++
+			})
 		}
 
-		result := fmt.Sprintf("Imported %d/%d thoughts (%d skipped, %d errors)", imported, len(thoughts), skipped, len(errs))
-		if len(errs) > 0 {
-			result += fmt.Sprintf("\nErrors: %s", strings.Join(errs, "; "))
+		ids, err := b.BulkImport(ctx, items, source)
+		if err != nil {
+			return toolError(fmt.Sprintf("bulk import aborted, nothing was saved: %v", err)), nil
 		}
-		return toolText(result), nil
+		return toolText(fmt.Sprintf("Imported %d thoughts atomically", len(ids))), nil
 	}
 }
 

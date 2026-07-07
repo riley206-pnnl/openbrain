@@ -106,7 +106,7 @@ func RegisterToolsWithOpts(s *server.MCPServer, b *brain.Brain, embedder embeddi
 
 	s.AddTool(
 		mcp.NewTool("bulk_import",
-			mcp.WithDescription("Import multiple thoughts at once."),
+			mcp.WithDescription("Import multiple thoughts as one atomic batch. Either every thought is saved or none is: if any item is malformed or a store step fails, nothing is saved and the call returns an error."),
 			mcp.WithArray("thoughts", mcp.Required(), mcp.Description("Array of thought objects to import")),
 			mcp.WithString("source", mcp.Description("Source identifier")),
 		),
