@@ -9,6 +9,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/windingriverholdings/openbrain/internal/config"
 	"github.com/windingriverholdings/openbrain/internal/db"
 	"github.com/windingriverholdings/openbrain/internal/embeddings"
 	"github.com/windingriverholdings/openbrain/internal/extract"
@@ -125,6 +126,73 @@ func TestBulkImport_EmptyBatch(t *testing.T) {
 	assert.Nil(t, ids)
 	assert.True(t, errors.Is(err, db.ErrEmptyBatch))
 	assert.False(t, fake.called)
+}
+
+// TestBulkImport_OverCapBatchRejected asserts a batch over the configured
+// item cap is refused with a typed error BEFORE any embed call, and nothing
+// is handed to the atomic inserter.
+func TestBulkImport_OverCapBatchRejected(t *testing.T) {
+	fake := &fakeBulkInserter{}
+	b := newBulkBrain(fake, staticEmbedder{})
+	b.cfg = &config.Config{BulkImportMaxItems: 2}
+
+	items := []BulkItem{
+		{Content: "one", ThoughtType: "note"},
+		{Content: "two", ThoughtType: "note"},
+		{Content: "three", ThoughtType: "note"},
+	}
+	ids, err := b.BulkImport(context.Background(), items, "import")
+	require.Error(t, err)
+	assert.Nil(t, ids)
+	assert.True(t, errors.Is(err, ErrBatchTooLarge), "expected ErrBatchTooLarge, got %v", err)
+	assert.False(t, fake.called, "no write may be attempted when the batch exceeds the item cap")
+}
+
+// TestBulkImport_OverCapContentRejected asserts an item whose content exceeds
+// the configured per-item length cap is refused with a typed error BEFORE any
+// embed call, and nothing is handed to the atomic inserter, even though an
+// earlier item in the same batch is within the cap.
+func TestBulkImport_OverCapContentRejected(t *testing.T) {
+	fake := &fakeBulkInserter{}
+	b := newBulkBrain(fake, staticEmbedder{})
+	b.cfg = &config.Config{BulkImportMaxContentChars: 5}
+
+	items := []BulkItem{
+		{Content: "short", ThoughtType: "note"},
+		{Content: "this content is too long for the cap", ThoughtType: "note"},
+	}
+	ids, err := b.BulkImport(context.Background(), items, "import")
+	require.Error(t, err)
+	assert.Nil(t, ids)
+	assert.True(t, errors.Is(err, ErrContentTooLong), "expected ErrContentTooLong, got %v", err)
+	assert.False(t, fake.called, "no write may be attempted when any item exceeds the content-length cap")
+}
+
+// TestBulkImport_WithinCapsSucceeds asserts a batch at exactly the configured
+// caps is accepted, proving the cap checks are inclusive boundaries, not
+// off-by-one rejections.
+func TestBulkImport_WithinCapsSucceeds(t *testing.T) {
+	fake := &fakeBulkInserter{}
+	b := newBulkBrain(fake, staticEmbedder{})
+	b.cfg = &config.Config{BulkImportMaxItems: 2, BulkImportMaxContentChars: 5}
+
+	items := []BulkItem{
+		{Content: "one", ThoughtType: "note"},
+		{Content: "two", ThoughtType: "note"},
+	}
+	ids, err := b.BulkImport(context.Background(), items, "import")
+	require.NoError(t, err)
+	assert.Len(t, ids, 2)
+	assert.True(t, fake.called)
+}
+
+// TestBulkImport_DefaultCapsApplyWhenCfgNil asserts the package-level default
+// caps are used when Brain has no config at all (cfg is nil), so a Brain
+// constructed without a config (as several existing tests and callers do)
+// still enforces a bound rather than accepting an unbounded batch.
+func TestBulkImport_DefaultCapsApplyWhenCfgNil(t *testing.T) {
+	assert.Equal(t, DefaultBulkImportMaxItems, effectiveBulkMaxItems(nil))
+	assert.Equal(t, DefaultBulkImportMaxContentRunes, effectiveBulkMaxContentRunes(nil))
 }
 
 // TestCaptureExtracted_StoreFailureIsLoud asserts that when the atomic store of

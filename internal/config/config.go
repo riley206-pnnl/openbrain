@@ -91,6 +91,15 @@ type Config struct {
 	IngestChunkOverlap int    `env:"OPENBRAIN_INGEST_CHUNK_OVERLAP" envDefault:"200"`
 	TesseractLangs     string `env:"OPENBRAIN_TESSERACT_LANGS" envDefault:"eng"`
 
+	// Bulk import
+	// BulkImportMaxItems caps the number of thoughts a single bulk_import call
+	// will accept, so an unbounded batch cannot drive one embedder round-trip
+	// per item and hold a single write transaction open indefinitely.
+	BulkImportMaxItems int `env:"OPENBRAIN_BULK_IMPORT_MAX_ITEMS" envDefault:"500"`
+	// BulkImportMaxContentChars caps the rune length of a single bulk_import
+	// item's content, mirroring the ingest path's own size limits.
+	BulkImportMaxContentChars int `env:"OPENBRAIN_BULK_IMPORT_MAX_CONTENT_CHARS" envDefault:"10000"`
+
 	// LLM extraction
 	ExtractProvider      string `env:"OPENBRAIN_EXTRACT_PROVIDER" envDefault:"none"`
 	ExtractModel         string `env:"OPENBRAIN_EXTRACT_MODEL" envDefault:"gemma3"`
