@@ -125,7 +125,7 @@ func mcpBulkImport(b *brain.Brain) server.ToolHandlerFunc {
 		// type check below already names the key on rejection.
 		raw, ok := args["thoughts"].([]any)
 		if !ok {
-			slog.Warn("rejected tool call: missing or invalid required argument", "tool", "bulk_import", "key", "thoughts")
+			slog.Warn("bulk_import tool: rejected required argument", "key", "thoughts")
 			return toolError("thoughts must be an array"), nil
 		}
 		source := stringArg(args, "source", "import")
