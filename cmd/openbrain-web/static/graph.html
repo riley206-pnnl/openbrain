@@ -235,6 +235,27 @@
       font-size: 0.8rem;
     }
     #state-overlay.hidden { display: none; }
+
+    /* ── screen-reader-only utility ── */
+    .sr-only {
+      position: absolute;
+      width: 1px; height: 1px;
+      padding: 0; margin: -1px;
+      overflow: hidden;
+      clip: rect(0,0,0,0);
+      white-space: nowrap;
+      border: 0;
+    }
+
+    /* ── legend items as buttons ── */
+    button.legend-item {
+      background: none;
+      border: none;
+      text-align: left;
+      width: 100%;
+      font-family: var(--font);
+      font-size: inherit;
+    }
   </style>
 </head>
 <body>
@@ -260,7 +281,9 @@
 
 <div class="main">
   <div id="canvas-wrap">
-    <canvas id="brain-canvas"></canvas>
+    <canvas id="brain-canvas"
+      aria-label="Similarity map of captured thoughts; use the region legend and type filter buttons to explore"></canvas>
+    <p id="sr-summary" class="sr-only" aria-live="polite"></p>
     <div id="state-overlay">
       <div class="icon">🧠</div>
       <p id="state-msg">Loading brain map…</p>
@@ -277,6 +300,7 @@
 
 <script>
 'use strict';
+(() => {
 
 const CLUSTER_COLORS = [
   '#3987e5','#199e70','#c98500','#008300',
@@ -307,6 +331,14 @@ let activeTypes = new Set();
 let transform = { x: 0, y: 0, k: 1 };
 let hoveredNode = null;
 let drag = null;
+
+// Coalesce multiple per-frame mutation calls into a single rAF render tick.
+let _rafPending = false;
+function scheduleRender() {
+  if (_rafPending) return;
+  _rafPending = true;
+  requestAnimationFrame(() => { _rafPending = false; render(); });
+}
 
 // ── canvas ────────────────────────────────────────────────────────────────────
 const wrap   = document.getElementById('canvas-wrap');
@@ -436,15 +468,17 @@ canvas.addEventListener('mousemove', e => {
   if (drag) {
     transform.x += e.movementX;
     transform.y += e.movementY;
-    render(); return;
+    scheduleRender(); return;
   }
   const hit = hitTest(px, py);
-  if (hit !== hoveredNode) { hoveredNode = hit; render(); }
+  if (hit !== hoveredNode) { hoveredNode = hit; scheduleRender(); }
   if (hit) showTooltip(hit, e.clientX, e.clientY);
   else hideTooltip();
 });
 
-canvas.addEventListener('mousedown', () => {
+canvas.addEventListener('mousedown', e => {
+  // Only start a pan on primary (left) button clicks.
+  if (e.button !== 0) return;
   drag = true; wrap.classList.add('panning');
 });
 canvas.addEventListener('mouseup', () => {
@@ -452,7 +486,12 @@ canvas.addEventListener('mouseup', () => {
 });
 canvas.addEventListener('mouseleave', () => {
   drag = false; wrap.classList.remove('panning');
-  hoveredNode = null; hideTooltip(); if (DATA) render();
+  hoveredNode = null; hideTooltip(); if (DATA) scheduleRender();
+});
+// Safety net: clear drag state on contextmenu so a right-click that opens the
+// browser menu can't leave the canvas stuck in pan mode.
+canvas.addEventListener('contextmenu', () => {
+  drag = false; wrap.classList.remove('panning');
 });
 canvas.addEventListener('wheel', e => {
   if (!DATA) return;
@@ -478,19 +517,32 @@ function buildLegend() {
   const container = document.getElementById('legend-items');
   container.innerHTML = '';
   for (const cl of DATA.clusters) {
-    const div = document.createElement('div');
-    div.className = 'legend-item';
-    div.innerHTML =
+    // Use <button> so each region is reachable and activatable by keyboard.
+    const btn = document.createElement('button');
+    btn.className = 'legend-item';
+    btn.setAttribute('aria-pressed', 'true');
+    btn.innerHTML =
       `<span class="legend-dot" style="background:${clusterColor(cl.id)}"></span>` +
       `<span><span class="legend-label">${esc(cl.label)}</span><br>` +
       `<span class="legend-count">${cl.size} thoughts</span></span>`;
-    div.addEventListener('click', () => {
+    btn.addEventListener('click', () => {
       if (hiddenClusters.has(cl.id)) hiddenClusters.delete(cl.id);
       else hiddenClusters.add(cl.id);
-      div.classList.toggle('dimmed');
-      render();
+      btn.classList.toggle('dimmed');
+      btn.setAttribute('aria-pressed', hiddenClusters.has(cl.id) ? 'false' : 'true');
+      scheduleRender();
     });
-    container.appendChild(div);
+    container.appendChild(btn);
+  }
+
+  // Update the screen-reader summary: list thought counts per visible region.
+  const srSummary = document.getElementById('sr-summary');
+  if (srSummary) {
+    const visible = DATA.clusters.filter(c => c.id >= 0);
+    const total = DATA.meta.n_thoughts;
+    const regions = visible.map(c => `${c.label} (${c.size})`).join(', ');
+    srSummary.textContent =
+      `Brain map: ${total} thoughts across ${visible.length} regions — ${regions}.`;
   }
 }
 
@@ -546,7 +598,7 @@ function hideState() { overlay.classList.add('hidden'); }
 // ── load data ─────────────────────────────────────────────────────────────────
 async function loadData() {
   try {
-    const res = await fetch('/brain.json');
+    const res = await fetch('/brain.json' + location.search);
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     DATA = await res.json();
 
@@ -579,6 +631,7 @@ async function loadData() {
 
 window.addEventListener('resize', resize);
 loadData();
+})();
 </script>
 </body>
 </html>

@@ -19,13 +19,16 @@ Options:
     --sim-thresh F      Min cosine similarity for an edge (default: 0.55)
 
 Requirements (install in a venv):
-    pip install psycopg[binary] pgvector numpy umap-learn hdbscan scikit-learn python-dotenv requests
+    pip install -r scripts/requirements-viz.txt
 """
 
 import argparse
 import json
+import os
 import sys
+import tempfile
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import requests
@@ -50,7 +53,7 @@ def _import_hdbscan():
         return None
 
 
-def load_thoughts(cfg):
+def load_thoughts(cfg: dict) -> list[dict]:
     import psycopg
     from pgvector.psycopg import register_vector
 
@@ -95,24 +98,29 @@ def load_thoughts(cfg):
     return thoughts
 
 
-def project_2d(embeddings, use_umap=True):
+def project_2d(embeddings: np.ndarray, use_umap: bool = True) -> np.ndarray:
+    N = len(embeddings)
     if use_umap:
         UMAP = _import_umap()
         if UMAP is not None:
-            print("  Running UMAP (cosine, n_neighbors=15, min_dist=0.1)…")
+            # n_neighbors must be < N; clamp so small brains don't crash.
+            n_neighbors = min(15, N - 1)
+            print(f"  Running UMAP (cosine, n_neighbors={n_neighbors}, min_dist=0.1)…")
             reducer = UMAP(n_components=2, metric="cosine",
-                           n_neighbors=15, min_dist=0.1,
+                           n_neighbors=n_neighbors, min_dist=0.1,
                            random_state=42, verbose=False)
             return reducer.fit_transform(embeddings)
 
     from sklearn.manifold import TSNE
-    print("  Running t-SNE (cosine, perplexity=30)…")
-    tsne = TSNE(n_components=2, metric="cosine", perplexity=30,
-                n_iter=1000, random_state=42)
+    # perplexity must be < N; clamp so small brains don't crash.
+    perplexity = min(30, max(5, (N - 1) // 3))
+    print(f"  Running t-SNE (cosine, perplexity={perplexity})…")
+    tsne = TSNE(n_components=2, metric="cosine", perplexity=perplexity,
+                max_iter=1000, random_state=42)
     return tsne.fit_transform(embeddings)
 
 
-def cluster_hdbscan(embeddings, min_cluster_size=8):
+def cluster_hdbscan(embeddings: np.ndarray, min_cluster_size: int = 8) -> np.ndarray | None:
     HDBSCAN = _import_hdbscan()
     if HDBSCAN is None:
         return None
@@ -127,7 +135,7 @@ def cluster_hdbscan(embeddings, min_cluster_size=8):
     return labels
 
 
-def cluster_kmeans(embeddings, k=8):
+def cluster_kmeans(embeddings: np.ndarray, k: int = 8) -> np.ndarray:
     from sklearn.cluster import KMeans
     print(f"  Running k-means (k={k})…")
     labels = KMeans(n_clusters=k, random_state=42, n_init=10).fit_predict(embeddings)
@@ -135,14 +143,19 @@ def cluster_kmeans(embeddings, k=8):
     return labels
 
 
-def compute_edges(embeddings, sim_thresh=0.55, max_edges=2000, top_k=5):
+def compute_edges(
+    embeddings: np.ndarray,
+    sim_thresh: float = 0.55,
+    max_edges: int = 2000,
+    top_k: int = 5,
+) -> list[dict]:
     print(f"  Computing cosine similarity edges (thresh={sim_thresh}, top_k={top_k})…")
     norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
     norms = np.where(norms == 0, 1, norms)
     normed = (embeddings / norms).astype(np.float32)
 
     edges = []
-    seen = set()
+    seen: set[tuple[int, int]] = set()
     N = len(normed)
     chunk = 200
     for start in range(0, N, chunk):
@@ -166,9 +179,10 @@ def compute_edges(embeddings, sim_thresh=0.55, max_edges=2000, top_k=5):
     return edges
 
 
-def heuristic_label(cluster_thoughts):
+def heuristic_label(cluster_thoughts: list[dict]) -> str:
     from collections import Counter
-    tag_counts, type_counts = Counter(), Counter()
+    tag_counts: Counter = Counter()
+    type_counts: Counter = Counter()
     for t in cluster_thoughts:
         for tag in t["tags"]:
             tag_counts[tag.lower()] += 1
@@ -180,7 +194,7 @@ def heuristic_label(cluster_thoughts):
     return dominant.replace("_", " ").title()
 
 
-def llm_label(cluster_thoughts, cfg, model):
+def llm_label(cluster_thoughts: list[dict], cfg: dict, model: str) -> str | None:
     sample = sorted(cluster_thoughts,
                     key=lambda t: (len(t["summary"]) > 0, len(t["content"])),
                     reverse=True)[:8]
@@ -197,7 +211,14 @@ def llm_label(cluster_thoughts, cfg, model):
     try:
         resp = requests.post(
             f"{base_url}/api/generate",
-            json={"model": model, "prompt": prompt, "stream": False},
+            json={
+                "model": model,
+                "prompt": prompt,
+                "stream": False,
+                # Fix temperature and seed so labels are stable across rebuilds
+                # when the underlying data hasn't changed.
+                "options": {"temperature": 0, "seed": 42},
+            },
             timeout=30,
         )
         resp.raise_for_status()
@@ -209,32 +230,14 @@ def llm_label(cluster_thoughts, cfg, model):
     return None
 
 
-# ── standalone HTML template (--standalone only) ───────────────────────────────
-_STANDALONE_TEMPLATE = """\
-<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8"/>
-<meta name="viewport" content="width=device-width,initial-scale=1.0"/>
-<title>OpenBrain — Thought Map (standalone)</title>
-</head>
-<body>
-<script>window.__STANDALONE__ = true; const DATA = __DATA_JSON__;</script>
-<script src="https://cdn.jsdelivr.net/npm/d3@7/dist/d3.min.js"></script>
-<script>
-// minimal shim so graph.html renderer works standalone
-document.addEventListener('DOMContentLoaded', () => { window.__brain_data = DATA; });
-</script>
-<p style="font:14px system-ui;padding:20px;color:#aaa">
-  This standalone file requires the renderer from graph.html.<br>
-  For the full experience run <code>make viz</code> and use the web UI.
-</p>
-</body>
-</html>
-"""
-
-
-def build_data(thoughts, coords_2d, labels, edges, clusters_out, cfg):
+def build_data(
+    thoughts: list[dict],
+    coords_2d: np.ndarray,
+    labels: list[int],
+    edges: list[dict],
+    clusters_out: list[dict],
+    cfg: dict,
+) -> dict:
     xs, ys = coords_2d[:, 0], coords_2d[:, 1]
     margin = 0.05
     xr, yr = xs.max() - xs.min(), ys.max() - ys.min()
@@ -275,25 +278,54 @@ def build_data(thoughts, coords_2d, labels, edges, clusters_out, cfg):
     }
 
 
-def main():
-    # Default output: repo-relative path to the embedded static dir
-    script_dir = Path(__file__).parent
-    repo_root = script_dir.parent
-    default_output = repo_root / "cmd" / "openbrain-web" / "static" / "brain.json"
+def _atomic_write(path: Path, text: str) -> None:
+    """Write *text* to *path* atomically via a temp-file rename.
 
+    The temp file is created in the same directory so os.replace() is a
+    same-filesystem rename (no cross-device copy).  If the write or the
+    subsequent JSON sanity-check fails the original file is left untouched.
+    """
+    fd, tmp = tempfile.mkstemp(dir=path.parent, suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(text)
+        # Quick sanity-check: re-parse to catch truncation/encoding errors.
+        json.loads(Path(tmp).read_text(encoding="utf-8"))
+        os.replace(tmp, path)
+    except Exception:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def parse_args(default_output: Path) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Build OpenBrain brain visualizer data")
     parser.add_argument("--output", default=str(default_output), metavar="PATH",
                         help=f"Write JSON to PATH (default: {default_output})")
     parser.add_argument("--standalone", metavar="FILE",
-                        help="Also write a self-contained HTML to FILE (offline use)")
-    parser.add_argument("--kmeans", type=int, default=0, metavar="K")
-    parser.add_argument("--no-llm", action="store_true")
-    parser.add_argument("--min-cluster", type=int, default=8, metavar="N")
-    parser.add_argument("--max-edges", type=int, default=2000, metavar="N")
-    parser.add_argument("--sim-thresh", type=float, default=0.55, metavar="F")
-    args = parser.parse_args()
+                        help="Write a self-contained HTML file to FILE (offline use)")
+    parser.add_argument("--kmeans", type=int, default=0, metavar="K",
+                        help="Use k-means with K clusters instead of HDBSCAN")
+    parser.add_argument("--no-llm", action="store_true",
+                        help="Skip LLM labeling; use heuristic labels only")
+    parser.add_argument("--min-cluster", type=int, default=8, metavar="N",
+                        help="HDBSCAN min_cluster_size (default: 8)")
+    parser.add_argument("--max-edges", type=int, default=2000, metavar="N",
+                        help="Max similarity edges (default: 2000)")
+    parser.add_argument("--sim-thresh", type=float, default=0.55, metavar="F",
+                        help="Min cosine similarity for an edge (default: 0.55)")
+    return parser.parse_args()
 
-    # Find .env by walking up from script location
+
+def load_config(script_dir: Path, repo_root: Path) -> dict:
+    """Load config from .env (if present) merged with real environment variables.
+
+    .env values take precedence so a local override file works as expected, but
+    environment variables set without a .env file are also honoured (e.g. in CI
+    or Docker).
+    """
     env_path = None
     for candidate in [script_dir, repo_root]:
         p = candidate / ".env"
@@ -301,12 +333,132 @@ def main():
             env_path = p
             break
 
-    cfg = {}
+    # Start from the real environment so Docker / CI setups work without a .env.
+    cfg: dict[str, Any] = dict(os.environ)
     if env_path:
         print(f"  Loading .env from {env_path}")
-        cfg = dotenv_values(env_path)
+        # .env values override env vars (local dev takes precedence).
+        cfg.update(dotenv_values(env_path))
     else:
-        print("  [warn] .env not found; using default DB settings")
+        print("  [warn] .env not found; using environment variables / defaults")
+    return cfg
+
+
+def resolve_ollama_model(cfg: dict) -> str:
+    """Return the Ollama model to use for cluster labeling.
+
+    Falls back to 'gemma3', the app's built-in default, so a stock install
+    works without any explicit model configuration.
+    """
+    return (
+        cfg.get("OPENBRAIN_EXTRACT_MODEL_FAST") or
+        cfg.get("OPENBRAIN_EXTRACT_MODEL") or
+        "gemma3"
+    )
+
+
+def label_clusters(
+    thoughts: list[dict],
+    coords_2d: np.ndarray,
+    labels: list[int],
+    cfg: dict,
+    ollama_model: str,
+    no_llm: bool,
+) -> tuple[list[dict], int, int]:
+    """Build cluster metadata with labels.
+
+    Returns (clusters_out, llm_attempts, llm_fallbacks).
+    """
+    clusters_out: list[dict] = []
+    llm_attempts = 0
+    llm_fallbacks = 0
+
+    for cid in sorted(set(labels)):
+        members = [thoughts[i] for i, lbl in enumerate(labels) if lbl == cid]
+        member_coords = [coords_2d[i] for i, lbl in enumerate(labels) if lbl == cid]
+        heuristic = heuristic_label(members)
+
+        if cid < 0:
+            label = "Unclustered"
+        elif no_llm:
+            label = heuristic
+            print(f"  Cluster {cid:3d} ({len(members):3d} thoughts) → {label}  [heuristic]")
+        else:
+            llm_attempts += 1
+            print(f"  Cluster {cid:3d} ({len(members):3d} thoughts) → asking LLM…", end="", flush=True)
+            llm = llm_label(members, cfg, ollama_model)
+            if llm:
+                label = llm
+                print(f' ✓  "{label}"')
+            else:
+                label = heuristic
+                llm_fallbacks += 1
+                print(f' fallback → "{label}"')
+
+        arr = np.array(member_coords)
+        clusters_out.append({
+            "id": cid,
+            "label": label,
+            "heuristic": heuristic,
+            "size": len(members),
+            "cx": round(float(arr[:, 0].mean()), 4),
+            "cy": round(float(arr[:, 1].mean()), 4),
+        })
+
+    return clusters_out, llm_attempts, llm_fallbacks
+
+
+def build_standalone_html(data_json: str, graph_html_path: Path) -> str:
+    """Return a self-contained HTML file with the renderer and data inlined.
+
+    Reads graph.html, strips its fetch('/brain.json'…) bootstrap, and injects
+    the data as a module-level constant so the file works without a server.
+    """
+    renderer = graph_html_path.read_text(encoding="utf-8")
+    # Replace the async fetch with a synchronous data injection so the
+    # standalone file works without any server or network request.
+    renderer = renderer.replace(
+        "const res = await fetch('/brain.json' + location.search);",
+        "// standalone mode: data is inlined below\n    const res = { ok: true, json: async () => __STANDALONE_DATA__ };",
+    )
+    # Inject the data constant before the closing </body> tag.
+    injection = f'<script>const __STANDALONE_DATA__ = {data_json};</script>'
+    renderer = renderer.replace("</body>", f"{injection}\n</body>", 1)
+    return renderer
+
+
+def write_output(
+    data_json: str,
+    output_path: Path,
+    standalone_path: Path | None,
+    graph_html_path: Path,
+) -> None:
+    """Write brain.json (atomically) and optionally a standalone HTML file."""
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    _atomic_write(output_path, data_json)
+    size_kb = output_path.stat().st_size / 1024
+    print(f"\n✅  brain.json written → {output_path} ({size_kb:.0f} KB)")
+
+    if standalone_path is not None:
+        html = build_standalone_html(data_json, graph_html_path)
+        standalone_path.parent.mkdir(parents=True, exist_ok=True)
+        _atomic_write(standalone_path, html)
+        print(f"   standalone HTML → {standalone_path}")
+
+
+def run_pipeline(args: argparse.Namespace) -> None:
+    script_dir = Path(__file__).parent
+    repo_root = script_dir.parent
+    graph_html_path = repo_root / "cmd" / "openbrain-web" / "static" / "graph.html"
+
+    cfg = load_config(script_dir, repo_root)
+
+    # Resolve the Ollama model up-front only when LLM labeling is requested.
+    # This ensures --no-llm never fails due to a missing model configuration.
+    ollama_model: str = ""
+    if not args.no_llm:
+        ollama_model = resolve_ollama_model(cfg)
+        print(f"  LLM model: {ollama_model}")
 
     print("\n[1/6] Loading thoughts from database…")
     thoughts = load_thoughts(cfg)
@@ -331,69 +483,43 @@ def main():
     unique_non_noise = sorted(set(labels) - {-1})
     id_map = {old: new for new, old in enumerate(unique_non_noise)}
     id_map[-1] = -1
-    labels = [id_map[l] for l in labels]
+    labels = [id_map[lbl] for lbl in labels]
 
     print("\n[4/6] Computing similarity edges…")
     edges = compute_edges(embeddings_arr, sim_thresh=args.sim_thresh,
                           max_edges=args.max_edges)
 
     print("\n[5/6] Generating cluster labels…")
-    ollama_model = (cfg.get("OPENBRAIN_EXTRACT_MODEL_FAST") or
-                    cfg.get("OPENBRAIN_EXTRACT_MODEL") or
-                    cfg.get("OPENBRAIN_CHAT_MODEL"))
-    if not ollama_model:
-        raise SystemExit("error: no LLM model configured — set OPENBRAIN_EXTRACT_MODEL_FAST, OPENBRAIN_EXTRACT_MODEL, or OPENBRAIN_CHAT_MODEL in .env")
+    clusters_out, llm_attempts, llm_fallbacks = label_clusters(
+        thoughts, coords_2d, labels, cfg, ollama_model, args.no_llm,
+    )
 
-    clusters_out = []
-    for cid in sorted(set(labels)):
-        members = [thoughts[i] for i, l in enumerate(labels) if l == cid]
-        member_coords = [coords_2d[i] for i, l in enumerate(labels) if l == cid]
-        heuristic = heuristic_label(members)
-
-        if cid < 0:
-            label = "Unclustered"
-        elif args.no_llm:
-            label = heuristic
-            print(f"  Cluster {cid:3d} ({len(members):3d} thoughts) → {label}  [heuristic]")
-        else:
-            print(f"  Cluster {cid:3d} ({len(members):3d} thoughts) → asking LLM…", end="", flush=True)
-            llm = llm_label(members, cfg, ollama_model)
-            if llm:
-                label = llm
-                print(f' ✓  "{label}"')
-            else:
-                label = heuristic
-                print(f' fallback → "{label}"')
-
-        arr = np.array(member_coords)
-        clusters_out.append({
-            "id": cid,
-            "label": label,
-            "heuristic": heuristic,
-            "size": len(members),
-            "cx": round(float(arr[:, 0].mean()), 4),
-            "cy": round(float(arr[:, 1].mean()), 4),
-        })
+    # Warn loudly if the LLM service was completely unreachable.
+    if llm_attempts > 0 and llm_fallbacks == llm_attempts:
+        print(f"\n  ⚠  All {llm_attempts} clusters fell back to heuristic labels "
+              f"— is Ollama reachable at {cfg.get('OPENBRAIN_OLLAMA_BASE_URL', 'http://localhost:11434')}?")
+    elif llm_fallbacks > 0:
+        print(f"\n  [info] {llm_fallbacks}/{llm_attempts} clusters used heuristic labels")
 
     print("\n[6/6] Writing output…")
     data = build_data(thoughts, coords_2d, labels, edges, clusters_out, cfg)
     data_json = json.dumps(data, ensure_ascii=False)
 
     output_path = Path(args.output)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_text(data_json, encoding="utf-8")
-    size_kb = output_path.stat().st_size / 1024
-    print(f"\n✅  brain.json written → {output_path} ({size_kb:.0f} KB)")
+    standalone_path = Path(args.standalone) if args.standalone else None
+    write_output(data_json, output_path, standalone_path, graph_html_path)
+
     print(f"   {data['meta']['n_thoughts']} nodes · {data['meta']['n_clusters']} clusters · {data['meta']['n_edges']} edges")
-
-    if args.standalone:
-        standalone_path = Path(args.standalone)
-        html = _STANDALONE_TEMPLATE.replace("__DATA_JSON__", data_json)
-        standalone_path.write_text(html, encoding="utf-8")
-        print(f"   standalone HTML → {standalone_path}")
-
     print(f"\n   Rebuild anytime:  make viz")
     print(f"   Then open:        http://127.0.0.1:10203/graph")
+
+
+def main() -> None:
+    script_dir = Path(__file__).parent
+    repo_root = script_dir.parent
+    default_output = repo_root / "cmd" / "openbrain-web" / "static" / "brain.json"
+    args = parse_args(default_output)
+    run_pipeline(args)
 
 
 if __name__ == "__main__":

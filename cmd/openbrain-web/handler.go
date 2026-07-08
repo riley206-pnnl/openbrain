@@ -71,10 +71,8 @@ func serveHTTP(ctx context.Context, cfg *config.Config, b *brain.Brain, embedder
 	if err != nil {
 		return fmt.Errorf("static fs: %w", err)
 	}
-	mux.Handle("/", http.FileServer(http.FS(staticSub)))
-	mux.HandleFunc("/graph", func(w http.ResponseWriter, r *http.Request) {
-		http.ServeFileFS(w, r, staticSub, "graph.html")
-	})
+	mux.Handle("/", staticAuth(cfg.WebWSToken, http.FileServer(http.FS(staticSub))))
+	mux.Handle("/graph", staticAuth(cfg.WebWSToken, graphHandler(staticSub)))
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		fmt.Fprint(w, "ok")
@@ -255,6 +253,31 @@ type wsResponse struct {
 	Content     string `json:"content"`
 	Intent      string `json:"intent"`
 	ThoughtType string `json:"thought_type"`
+}
+
+// staticAuth wraps a handler so that, when authToken is non-empty, requests must
+// carry the token via the ?token= query parameter (the same mechanism used by
+// wsHandler).  When authToken is empty the handler is passed through unchanged.
+func staticAuth(authToken string, next http.Handler) http.Handler {
+	if authToken == "" {
+		return next
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		qToken := r.URL.Query().Get("token")
+		if subtle.ConstantTimeCompare([]byte(qToken), []byte(authToken)) != 1 {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// graphHandler serves graph.html at the /graph route without requiring the .html
+// suffix in the URL.
+func graphHandler(staticSub fs.FS) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.ServeFileFS(w, r, staticSub, "graph.html")
+	})
 }
 
 func wsHandler(b *brain.Brain, upgrader websocket.Upgrader, authToken string) http.HandlerFunc {
