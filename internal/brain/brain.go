@@ -49,6 +49,12 @@ type Brain struct {
 	// extract-then-auto_capture path, so their all-or-nothing contract is
 	// testable without a live database.
 	bulkInsertFn func(ctx context.Context, inputs []db.ThoughtInput) ([]string, error)
+
+	// storeFn is a seam over the single-thought persist call (db.InsertThought),
+	// defaulted in New to a closure bound to b.pool. It exists so Capture's
+	// full path, including the post-embed success outcome, is testable
+	// without a live database, mirroring the bulkInsertFn/supersedeFn seams.
+	storeFn func(ctx context.Context, content string, embedding []float32, thoughtType string, tags []string, source string) (string, error)
 }
 
 // New creates a Brain with the given dependencies.
@@ -64,6 +70,9 @@ func New(pool *pgxpool.Pool, embedder embeddings.Embedder, cfg *config.Config) *
 	}
 	b.bulkInsertFn = func(ctx context.Context, inputs []db.ThoughtInput) ([]string, error) {
 		return db.BulkInsertThoughts(ctx, b.pool, inputs)
+	}
+	b.storeFn = func(ctx context.Context, content string, embedding []float32, thoughtType string, tags []string, source string) (string, error) {
+		return db.InsertThought(ctx, b.pool, content, embedding, thoughtType, tags, source, nil, nil)
 	}
 	return b
 }
@@ -84,6 +93,18 @@ func (b *Brain) SetSeamsForTesting(
 	}
 	if bulkInsertFn != nil {
 		b.bulkInsertFn = bulkInsertFn
+	}
+}
+
+// SetStoreFnForTesting overrides the single-thought store seam from test code
+// in OTHER packages (e.g. internal/mcptools), so Capture's full success path
+// is exercisable without a live database. Production code must never call
+// this. See SetSeamsForTesting for the equivalent extract/bulk-insert seams.
+func (b *Brain) SetStoreFnForTesting(
+	storeFn func(ctx context.Context, content string, embedding []float32, thoughtType string, tags []string, source string) (string, error),
+) {
+	if storeFn != nil {
+		b.storeFn = storeFn
 	}
 }
 
@@ -113,13 +134,19 @@ func (b *Brain) Dispatch(ctx context.Context, parsed intent.ParsedIntent, source
 
 // Capture stores a single thought with embedding and subject linking.
 func (b *Brain) Capture(ctx context.Context, parsed intent.ParsedIntent, source string) (string, error) {
+	if err := requireNonEmptyText("capture", parsed.Text); err != nil {
+		return "", err
+	}
+
 	embedding, err := b.embedder.Embed(ctx, parsed.Text)
 	if err != nil {
+		slog.Error("capture: embed failed", "source", source, "thought_type", parsed.ThoughtType, "content_len", len(parsed.Text), "error", err)
 		return "", fmt.Errorf("embed thought: %w", err)
 	}
 
-	id, err := db.InsertThought(ctx, b.pool, parsed.Text, embedding, parsed.ThoughtType, parsed.Tags, source, nil, nil)
+	id, err := b.storeFn(ctx, parsed.Text, embedding, parsed.ThoughtType, parsed.Tags, source)
 	if err != nil {
+		slog.Error("capture: store failed", "source", source, "thought_type", parsed.ThoughtType, "error", err)
 		return "", err
 	}
 
@@ -161,8 +188,13 @@ func effectiveThreshold(base float64, filteredThreshold float64, opts SearchOpts
 // Keyword and hybrid searches ignore tags — this is a known limitation that
 // should be addressed when those query paths gain tag support in the DB layer.
 func (b *Brain) Search(ctx context.Context, query string, opts SearchOpts) ([]model.ThoughtRow, error) {
+	if err := requireNonEmptyText("search", query); err != nil {
+		return nil, err
+	}
+
 	embedding, err := b.embedder.Embed(ctx, query)
 	if err != nil {
+		slog.Error("search: embed failed", "mode", opts.Mode, "query_len", len(query), "error", err)
 		return nil, fmt.Errorf("embed query: %w", err)
 	}
 
@@ -202,8 +234,13 @@ func (b *Brain) GetReview(ctx context.Context, days int) ([]model.ThoughtRow, er
 // find the best prior match; when there is no match the new thought is captured
 // normally.
 func (b *Brain) Supersede(ctx context.Context, parsed intent.ParsedIntent, source string) (string, error) {
+	if err := requireNonEmptyText("supersede", parsed.Text); err != nil {
+		return "", err
+	}
+
 	embedding, err := b.embedder.Embed(ctx, parsed.Text)
 	if err != nil {
+		slog.Error("supersede: embed content failed", "source", source, "content_len", len(parsed.Text), "error", err)
 		return "", fmt.Errorf("embed supersede: %w", err)
 	}
 
@@ -249,9 +286,13 @@ func (b *Brain) resolveSupersedeTarget(ctx context.Context, parsed intent.Parsed
 
 	searchEmbedding := embedding
 	if parsed.SupersedeQuery != nil {
+		if err := requireNonEmptyText("supersede query", *parsed.SupersedeQuery); err != nil {
+			return "", err
+		}
 		var err error
 		searchEmbedding, err = b.embedder.Embed(ctx, *parsed.SupersedeQuery)
 		if err != nil {
+			slog.Error("supersede: embed query failed", "query_len", len(*parsed.SupersedeQuery), "error", err)
 			return "", fmt.Errorf("embed supersede query: %w", err)
 		}
 	}
