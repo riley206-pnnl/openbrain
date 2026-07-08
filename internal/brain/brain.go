@@ -192,6 +192,11 @@ func (b *Brain) GetReview(ctx context.Context, days int) ([]model.ThoughtRow, er
 	return db.GetThoughtsSince(ctx, b.pool, days)
 }
 
+// GetThought returns a single thought by UUID, or nil if not found.
+func (b *Brain) GetThought(ctx context.Context, id string) (*model.ThoughtRow, error) {
+	return db.GetThoughtByID(ctx, b.pool, id)
+}
+
 // Supersede captures a new thought and marks an older thought as superseded in
 // one atomic transaction: either both writes commit or both roll back, so no
 // orphan capture is ever left behind. On any failure it returns a real, typed

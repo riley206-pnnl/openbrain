@@ -80,6 +80,7 @@ func serveHTTP(ctx context.Context, cfg *config.Config, b *brain.Brain, embedder
 
 	mux.HandleFunc("/api/search", apiSearch(b))
 	mux.HandleFunc("/api/search/nodes", apiSearchNodes(b))
+	mux.HandleFunc("/api/thought/", apiGetThought(b))
 	mux.HandleFunc("/api/capture", apiCapture(b))
 	mux.HandleFunc("/api/stats", apiStats(b))
 	mux.HandleFunc("/api/review", apiReview(b))
@@ -236,6 +237,56 @@ func apiSearchNodes(b *brain.Brain) http.HandlerFunc {
 		}
 
 		jsonResponse(w, results)
+	}
+}
+
+// apiGetThought returns a single thought by UUID for the detail panel.
+// Route: GET /api/thought/{uuid}
+func apiGetThought(b *brain.Brain) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		id := strings.TrimPrefix(r.URL.Path, "/api/thought/")
+		if id == "" {
+			http.Error(w, "missing thought id", http.StatusBadRequest)
+			return
+		}
+
+		thought, err := b.GetThought(r.Context(), id)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		if thought == nil {
+			http.Error(w, "thought not found", http.StatusNotFound)
+			return
+		}
+
+		type thoughtDetail struct {
+			ID          string   `json:"id"`
+			Type        string   `json:"type"`
+			Tags        []string `json:"tags"`
+			Source      string   `json:"source"`
+			Summary     string   `json:"summary"`
+			Content     string   `json:"content"`
+			CreatedAt   string   `json:"created_at"`
+		}
+
+		summary := ""
+		if thought.Summary != nil {
+			summary = *thought.Summary
+		}
+		tags := thought.Tags
+		if tags == nil {
+			tags = []string{}
+		}
+		jsonResponse(w, thoughtDetail{
+			ID:        thought.ID,
+			Type:      thought.ThoughtType,
+			Tags:      tags,
+			Source:    thought.Source,
+			Summary:   summary,
+			Content:   thought.Content,
+			CreatedAt: thought.CreatedAt.Format("2006-01-02 15:04"),
+		})
 	}
 }
 

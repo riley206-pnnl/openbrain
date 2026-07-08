@@ -236,6 +236,110 @@
     }
     #state-overlay.hidden { display: none; }
 
+    /* ── thought detail panel (slides in from right) ── */
+    #detail-panel {
+      position: fixed;
+      top: 0; right: 0; bottom: 0;
+      width: 420px;
+      background: var(--surface);
+      border-left: 1px solid var(--border);
+      display: flex;
+      flex-direction: column;
+      z-index: 300;
+      transform: translateX(100%);
+      transition: transform 0.22s ease;
+      box-shadow: -8px 0 32px rgba(0,0,0,0.45);
+    }
+    #detail-panel.open { transform: translateX(0); }
+
+    #detail-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 14px 16px;
+      border-bottom: 1px solid var(--border);
+      flex-shrink: 0;
+      gap: 10px;
+    }
+    #detail-type {
+      font-size: 0.72rem;
+      text-transform: uppercase;
+      letter-spacing: 0.07em;
+      color: var(--text-dim);
+    }
+    #detail-close {
+      background: transparent;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      color: var(--text-dim);
+      font-family: var(--font);
+      font-size: 0.8rem;
+      padding: 3px 9px;
+      cursor: pointer;
+      flex-shrink: 0;
+      transition: border-color 0.15s, color 0.15s;
+    }
+    #detail-close:hover { border-color: var(--accent-dim); color: var(--text); }
+
+    #detail-body {
+      flex: 1 1 auto;
+      overflow-y: auto;
+      padding: 16px;
+    }
+    #detail-summary {
+      font-size: 0.9rem;
+      font-weight: 600;
+      color: var(--text);
+      line-height: 1.5;
+      margin-bottom: 12px;
+    }
+    #detail-meta {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      margin-bottom: 14px;
+    }
+    .detail-tag {
+      background: var(--surface2);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 2px 8px;
+      font-size: 0.68rem;
+      color: var(--text-dim);
+    }
+    #detail-source {
+      font-size: 0.72rem;
+      color: var(--text-dim);
+      margin-bottom: 14px;
+      font-family: var(--mono);
+      word-break: break-all;
+    }
+    #detail-divider {
+      border: none;
+      border-top: 1px solid var(--border);
+      margin: 12px 0;
+    }
+    #detail-content {
+      font-size: 0.82rem;
+      color: var(--text);
+      line-height: 1.7;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+    #detail-date {
+      font-size: 0.68rem;
+      color: var(--text-dim);
+      margin-top: 16px;
+      padding-top: 12px;
+      border-top: 1px solid var(--border);
+    }
+    #detail-loading {
+      color: var(--text-dim);
+      font-size: 0.82rem;
+      text-align: center;
+      padding: 40px 0;
+    }
+
     /* ── search chat panel (bottom-right, fixed overlay) ── */
     #search-panel {
       position: fixed;
@@ -440,6 +544,17 @@
 
 <div id="type-filter"></div>
 <div id="tooltip"></div>
+
+<!-- ── thought detail panel ── -->
+<div id="detail-panel" role="dialog" aria-label="Thought detail" aria-modal="true">
+  <div id="detail-header">
+    <span id="detail-type"></span>
+    <button id="detail-close" aria-label="Close detail panel">Close ✕</button>
+  </div>
+  <div id="detail-body">
+    <p id="detail-loading">Loading…</p>
+  </div>
+</div>
 
 <!-- ── search chat panel ── -->
 <div id="search-panel" role="search" aria-label="Search memories">
@@ -778,6 +893,76 @@ document.getElementById('node-size').addEventListener('input', function() {
   nodeR = +this.value; render();
 });
 
+// ── detail panel ─────────────────────────────────────────────────────────────
+const detailPanel  = document.getElementById('detail-panel');
+const detailBody   = document.getElementById('detail-body');
+const detailType   = document.getElementById('detail-type');
+const detailClose  = document.getElementById('detail-close');
+
+function closeDetail() {
+  detailPanel.classList.remove('open');
+}
+
+detailClose.addEventListener('click', closeDetail);
+
+// Close on Escape key
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape' && detailPanel.classList.contains('open')) closeDetail();
+});
+
+async function openDetail(nodeId) {
+  detailPanel.classList.add('open');
+  detailType.textContent = '';
+  detailBody.innerHTML = '<p id="detail-loading">Loading…</p>';
+
+  try {
+    const res = await fetch(`/api/thought/${encodeURIComponent(nodeId)}`);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const t = await res.json();
+
+    const icon = TYPE_ICONS[t.type] || '📄';
+    detailType.textContent = `${icon} ${t.type}`;
+
+    const tagsHtml = t.tags.length
+      ? t.tags.map(tag => `<span class="detail-tag">${esc(tag)}</span>`).join('')
+      : '';
+    const sourceHtml = t.source
+      ? `<div id="detail-source">📂 ${esc(t.source)}</div>`
+      : '';
+    const summaryHtml = t.summary
+      ? `<div id="detail-summary">${esc(t.summary)}</div>`
+      : '';
+
+    detailBody.innerHTML =
+      summaryHtml +
+      (tagsHtml ? `<div id="detail-meta">${tagsHtml}</div>` : '') +
+      sourceHtml +
+      `<hr id="detail-divider"/>` +
+      `<div id="detail-content">${esc(t.content)}</div>` +
+      `<div id="detail-date">Captured ${esc(t.created_at)}</div>`;
+
+  } catch (err) {
+    detailBody.innerHTML =
+      `<p style="color:var(--red);font-size:0.82rem">Failed to load: ${esc(err.message)}</p>`;
+  }
+}
+
+// Canvas click — open detail for the node under the cursor (only if not dragging).
+let _mouseDownPos = null;
+canvas.addEventListener('mousedown', e => {
+  if (e.button === 0) _mouseDownPos = { x: e.clientX, y: e.clientY };
+});
+canvas.addEventListener('click', e => {
+  if (!DATA || !_mouseDownPos) return;
+  // Ignore if the mouse moved more than 4px (it was a pan, not a click).
+  const dx = e.clientX - _mouseDownPos.x, dy = e.clientY - _mouseDownPos.y;
+  if (dx * dx + dy * dy > 16) return;
+
+  const rect = canvas.getBoundingClientRect();
+  const hit = hitTest(e.clientX - rect.left, e.clientY - rect.top);
+  if (hit) openDetail(hit.id);
+});
+
 // ── pan-to-node ───────────────────────────────────────────────────────────────
 function panToNode(n) {
   if (!DATA) return;
@@ -871,13 +1056,15 @@ async function runSearch() {
       render();
     }
 
-    // Clicking a result pans to that node.
+    // Clicking a result pans to that node and opens the detail panel.
     searchResults.querySelectorAll('.search-result-item').forEach(el => {
       el.addEventListener('click', () => {
-        if (!DATA) return;
         const id = el.dataset.id;
-        const node = nodeById[id];
-        if (node) panToNode(node);
+        if (DATA) {
+          const node = nodeById[id];
+          if (node) panToNode(node);
+        }
+        openDetail(id);
       });
     });
 
