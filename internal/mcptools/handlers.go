@@ -20,8 +20,11 @@ import (
 // mcpCapture routes capture through brain.Capture.
 func mcpCapture(b *brain.Brain) server.ToolHandlerFunc {
 	return func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		content, errResult, ok := requireString("capture_thought", request, "content")
+		if !ok {
+			return errResult, nil
+		}
 		args := request.GetArguments()
-		content, _ := args["content"].(string)
 		thoughtType, _ := args["thought_type"].(string)
 		if thoughtType == "" {
 			thoughtType = intent.InferType(content)
@@ -46,8 +49,11 @@ func mcpCapture(b *brain.Brain) server.ToolHandlerFunc {
 // mcpSearch routes search through brain.Search with formatted output.
 func mcpSearch(b *brain.Brain) server.ToolHandlerFunc {
 	return func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		query, errResult, ok := requireString("search_thoughts", request, "query")
+		if !ok {
+			return errResult, nil
+		}
 		args := request.GetArguments()
-		query, _ := args["query"].(string)
 
 		mode := stringArg(args, "mode", "hybrid")
 		if !validSearchModes[mode] {
@@ -113,8 +119,13 @@ func mcpDispatch(b *brain.Brain, i intent.Intent) server.ToolHandlerFunc {
 func mcpBulkImport(b *brain.Brain) server.ToolHandlerFunc {
 	return func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		args := request.GetArguments()
+		// "thoughts" is a required array of objects, not a string, so it is
+		// not a candidate for requireString; mcp-go v0.30.0 has no typed
+		// RequireArray accessor for heterogeneous []any. The presence and
+		// type check below already names the key on rejection.
 		raw, ok := args["thoughts"].([]any)
 		if !ok {
+			slog.Warn("rejected tool call: missing or invalid required argument", "tool", "bulk_import", "key", "thoughts")
 			return toolError("thoughts must be an array"), nil
 		}
 		source := stringArg(args, "source", "import")
@@ -146,8 +157,11 @@ func mcpBulkImport(b *brain.Brain) server.ToolHandlerFunc {
 // mcpExtract routes through brain.DeepCapture.
 func mcpExtract(b *brain.Brain) server.ToolHandlerFunc {
 	return func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		text, errResult, ok := requireString("extract_thoughts", request, "text")
+		if !ok {
+			return errResult, nil
+		}
 		args := request.GetArguments()
-		text, _ := args["text"].(string)
 		autoCapture := true
 		if ac, ok := args["auto_capture"].(bool); ok {
 			autoCapture = ac
@@ -179,8 +193,11 @@ func mcpExtract(b *brain.Brain) server.ToolHandlerFunc {
 // mcpSupersede routes through brain.Supersede with optional query/ID overrides.
 func mcpSupersede(b *brain.Brain) server.ToolHandlerFunc {
 	return func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		content, errResult, ok := requireString("supersede_thought", request, "content")
+		if !ok {
+			return errResult, nil
+		}
 		args := request.GetArguments()
-		content, _ := args["content"].(string)
 		thoughtType := stringArg(args, "thought_type", "")
 		if thoughtType == "" {
 			thoughtType = intent.InferType(content)
@@ -213,9 +230,11 @@ func mcpSupersede(b *brain.Brain) server.ToolHandlerFunc {
 // mcpIngestDocument handles the ingest_document MCP tool.
 func mcpIngestDocument(b *brain.Brain, cfg *config.Config) server.ToolHandlerFunc {
 	return func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		filePath, errResult, ok := requireString("ingest_document", request, "file_path")
+		if !ok {
+			return errResult, nil
+		}
 		args := request.GetArguments()
-
-		filePath, _ := args["file_path"].(string)
 		source := stringArg(args, "source", "claude")
 		autoCapture := boolArg(args, "auto_capture", true)
 
