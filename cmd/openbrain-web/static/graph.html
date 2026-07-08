@@ -236,6 +236,149 @@
     }
     #state-overlay.hidden { display: none; }
 
+    /* ── search chat panel (bottom-right, fixed overlay) ── */
+    #search-panel {
+      position: fixed;
+      bottom: 20px;
+      right: 20px;
+      width: 320px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      box-shadow: 0 8px 32px rgba(0,0,0,0.55);
+      display: flex;
+      flex-direction: column;
+      z-index: 200;
+      transition: height 0.18s ease;
+    }
+    #search-panel.collapsed { height: auto; }
+
+    #search-panel-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 9px 12px;
+      border-bottom: 1px solid var(--border);
+      cursor: pointer;
+      user-select: none;
+      flex-shrink: 0;
+    }
+    #search-panel-header span {
+      font-size: 0.78rem;
+      font-weight: 600;
+      color: var(--text-dim);
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+    }
+    #search-panel-toggle {
+      font-size: 0.75rem;
+      color: var(--text-dim);
+      transition: transform 0.18s;
+    }
+    #search-panel.collapsed #search-panel-toggle { transform: rotate(180deg); }
+
+    #search-panel-body {
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+    #search-panel.collapsed #search-panel-body { display: none; }
+
+    #search-results {
+      overflow-y: auto;
+      max-height: 280px;
+      padding: 6px 0;
+    }
+    .search-result-item {
+      padding: 7px 12px;
+      cursor: pointer;
+      border-bottom: 1px solid var(--border);
+      transition: background 0.1s;
+    }
+    .search-result-item:last-child { border-bottom: none; }
+    .search-result-item:hover { background: var(--surface2); }
+    .sri-meta {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 0.68rem;
+      color: var(--text-dim);
+      margin-bottom: 3px;
+    }
+    .sri-score {
+      background: var(--accent-dim);
+      color: var(--accent);
+      border-radius: 4px;
+      padding: 1px 5px;
+      font-size: 0.65rem;
+      font-family: var(--mono);
+    }
+    .sri-text {
+      font-size: 0.78rem;
+      color: var(--text);
+      line-height: 1.4;
+      display: -webkit-box;
+      -webkit-line-clamp: 2;
+      -webkit-box-orient: vertical;
+      overflow: hidden;
+    }
+    .search-empty {
+      padding: 14px 12px;
+      font-size: 0.78rem;
+      color: var(--text-dim);
+      text-align: center;
+    }
+
+    #search-panel-footer {
+      padding: 8px 10px;
+      border-top: 1px solid var(--border);
+      display: flex;
+      gap: 6px;
+      align-items: center;
+      flex-shrink: 0;
+    }
+    #search-input {
+      flex: 1;
+      background: var(--surface2);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      color: var(--text);
+      font-family: var(--font);
+      font-size: 0.8rem;
+      padding: 5px 9px;
+      outline: none;
+      transition: border-color 0.15s;
+    }
+    #search-input:focus { border-color: var(--accent-dim); }
+    #search-input::placeholder { color: var(--text-dim); }
+    #search-submit {
+      flex-shrink: 0;
+      background: var(--accent-dim);
+      border: none;
+      border-radius: 6px;
+      color: var(--accent);
+      font-family: var(--font);
+      font-size: 0.78rem;
+      padding: 5px 10px;
+      cursor: pointer;
+      transition: background 0.15s;
+    }
+    #search-submit:hover { background: var(--accent); color: var(--bg); }
+    #search-clear {
+      flex-shrink: 0;
+      background: transparent;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      color: var(--text-dim);
+      font-family: var(--font);
+      font-size: 0.78rem;
+      padding: 5px 8px;
+      cursor: pointer;
+      transition: border-color 0.15s, color 0.15s;
+    }
+    #search-clear:hover { border-color: var(--red); color: var(--red); }
+    #search-clear.hidden { display: none; }
+
     /* ── screen-reader-only utility ── */
     .sr-only {
       position: absolute;
@@ -298,6 +441,26 @@
 <div id="type-filter"></div>
 <div id="tooltip"></div>
 
+<!-- ── search chat panel ── -->
+<div id="search-panel" role="search" aria-label="Search memories">
+  <div id="search-panel-header" role="button" tabindex="0" aria-expanded="true"
+       aria-controls="search-panel-body">
+    <span>🔍 Search memories</span>
+    <span id="search-panel-toggle" aria-hidden="true">▼</span>
+  </div>
+  <div id="search-panel-body">
+    <div id="search-results" aria-live="polite" aria-label="Search results">
+      <p class="search-empty">Search to highlight matching nodes.</p>
+    </div>
+    <div id="search-panel-footer">
+      <input id="search-input" type="search" placeholder="e.g. CRISP syslog…"
+             autocomplete="off" spellcheck="false"/>
+      <button id="search-submit" title="Search (Enter)">Go</button>
+      <button id="search-clear" class="hidden" title="Clear highlights">✕</button>
+    </div>
+  </div>
+</div>
+
 <script>
 'use strict';
 (() => {
@@ -331,6 +494,10 @@ let activeTypes = new Set();
 let transform = { x: 0, y: 0, k: 1 };
 let hoveredNode = null;
 let drag = null;
+
+// Search highlight state — empty set means "no active search" (normal render).
+let highlightedIds = new Set();
+let scoreById = {};  // id → score (0–1)
 
 // Coalesce multiple per-frame mutation calls into a single rAF render tick.
 let _rafPending = false;
@@ -387,20 +554,46 @@ function render() {
       ctx.beginPath();
       ctx.moveTo(ax, ay);
       ctx.lineTo(bx, by);
-      ctx.strokeStyle = `rgba(110,142,245,${(e.w - 0.5) * 0.22})`;
-      ctx.lineWidth = 0.7;
+      ctx.strokeStyle = `rgba(110,142,245,${0.12 + (e.w - 0.5) * 0.55})`;
+      ctx.lineWidth = 1.2;
       ctx.stroke();
     }
   }
 
+  const hasHighlight = highlightedIds.size > 0;
+
   for (const n of DATA.nodes) {
     if (!visible(n)) continue;
     const [sx, sy] = toScreen(n.x, n.y);
-    const r = hoveredNode === n ? nodeR * 1.7 : nodeR;
+    const isHighlighted = hasHighlight && highlightedIds.has(n.id);
+    const isHovered = hoveredNode === n;
+
+    // Alpha: during a search, non-matched nodes fade heavily; hover still boosts.
+    let alpha;
+    if (hasHighlight) {
+      alpha = isHighlighted ? 0.92 : 0.10;
+    } else {
+      alpha = isHovered ? 0.95 : (hoveredNode ? 0.35 : 0.82);
+    }
+
+    const r = isHovered ? nodeR * 1.7 : nodeR;
+
+    // Glow ring for highlighted nodes (drawn behind the fill).
+    if (isHighlighted) {
+      const glowR = r + 4 + (scoreById[n.id] || 0) * 3;
+      ctx.beginPath();
+      ctx.arc(sx, sy, glowR, 0, 2 * Math.PI);
+      ctx.strokeStyle = '#6c8ef5';  // --accent
+      ctx.lineWidth = 2;
+      ctx.globalAlpha = 0.7;
+      ctx.stroke();
+      ctx.globalAlpha = 1;
+    }
+
     ctx.beginPath();
     ctx.arc(sx, sy, r, 0, 2 * Math.PI);
     ctx.fillStyle = clusterColor(n.cluster);
-    ctx.globalAlpha = hoveredNode && hoveredNode !== n ? 0.35 : 0.82;
+    ctx.globalAlpha = alpha;
     ctx.fill();
     ctx.strokeStyle = 'rgba(15,17,23,0.8)';
     ctx.lineWidth = 1.5;
@@ -583,6 +776,123 @@ document.getElementById('btn-labels').addEventListener('click', function() {
 });
 document.getElementById('node-size').addEventListener('input', function() {
   nodeR = +this.value; render();
+});
+
+// ── pan-to-node ───────────────────────────────────────────────────────────────
+function panToNode(n) {
+  if (!DATA) return;
+  const [xMin, xMax, yMin, yMax] = DATA.meta.bounds;
+  // Compute where this node sits in "base" (pre-transform) screen space.
+  const sx = PAD + (n.x - xMin) / (xMax - xMin) * (W - 2 * PAD);
+  const sy = PAD + (n.y - yMin) / (yMax - yMin) * (H - 2 * PAD);
+  // Set transform so node ends up at viewport center.
+  transform.x = W / 2 - sx * transform.k;
+  transform.y = H / 2 - sy * transform.k;
+  render();
+}
+
+// ── search panel ─────────────────────────────────────────────────────────────
+const searchInput   = document.getElementById('search-input');
+const searchSubmit  = document.getElementById('search-submit');
+const searchClear   = document.getElementById('search-clear');
+const searchResults = document.getElementById('search-results');
+const panelHeader   = document.getElementById('search-panel-header');
+const searchPanel   = document.getElementById('search-panel');
+
+panelHeader.addEventListener('click', () => {
+  searchPanel.classList.toggle('collapsed');
+  const expanded = !searchPanel.classList.contains('collapsed');
+  panelHeader.setAttribute('aria-expanded', String(expanded));
+});
+panelHeader.addEventListener('keydown', e => {
+  if (e.key === 'Enter' || e.key === ' ') {
+    e.preventDefault();
+    panelHeader.click();
+  }
+});
+
+function clearSearch() {
+  highlightedIds = new Set();
+  scoreById = {};
+  searchResults.innerHTML = '<p class="search-empty">Search to highlight matching nodes.</p>';
+  searchClear.classList.add('hidden');
+  searchInput.value = '';
+  if (DATA) render();
+}
+
+async function runSearch() {
+  const q = searchInput.value.trim();
+  if (!q) return;
+
+  searchResults.innerHTML = '<p class="search-empty">Searching…</p>';
+  searchSubmit.disabled = true;
+
+  try {
+    const res = await fetch('/api/search/nodes?q=' + encodeURIComponent(q));
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const rows = await res.json();
+
+    highlightedIds = new Set(rows.map(r => r.id));
+    scoreById = {};
+    rows.forEach(r => { scoreById[r.id] = r.score; });
+
+    if (rows.length === 0) {
+      searchResults.innerHTML = '<p class="search-empty">No matching memories found.</p>';
+      searchClear.classList.remove('hidden');
+      if (DATA) render();
+      return;
+    }
+
+    // Build result list — only show entries that exist in the current brain.json.
+    const nodeById = DATA ? Object.fromEntries(DATA.nodes.map(n => [n.id, n])) : {};
+    let html = '';
+    for (const r of rows) {
+      const preview = (r.summary || r.content || '').slice(0, 140);
+      const icon = TYPE_ICONS[r.type] || '📄';
+      const inGraph = !!nodeById[r.id];
+      const dimClass = inGraph ? '' : ' style="opacity:0.5" title="Not in current brain.json snapshot"';
+      html +=
+        `<div class="search-result-item" data-id="${esc(r.id)}"${dimClass}>` +
+          `<div class="sri-meta">` +
+            `<span>${icon} ${esc(r.type)}</span>` +
+            `<span class="sri-score">${r.score.toFixed(2)}</span>` +
+            `<span>${esc(r.created_at)}</span>` +
+          `</div>` +
+          `<div class="sri-text">${esc(preview)}</div>` +
+        `</div>`;
+    }
+    searchResults.innerHTML = html;
+    searchClear.classList.remove('hidden');
+
+    // Pan to the top result if it exists in the graph.
+    if (DATA && nodeById[rows[0].id]) {
+      panToNode(nodeById[rows[0].id]);
+    } else if (DATA) {
+      render();
+    }
+
+    // Clicking a result pans to that node.
+    searchResults.querySelectorAll('.search-result-item').forEach(el => {
+      el.addEventListener('click', () => {
+        if (!DATA) return;
+        const id = el.dataset.id;
+        const node = nodeById[id];
+        if (node) panToNode(node);
+      });
+    });
+
+  } catch (err) {
+    searchResults.innerHTML = `<p class="search-empty" style="color:var(--red)">Error: ${esc(err.message)}</p>`;
+  } finally {
+    searchSubmit.disabled = false;
+  }
+}
+
+searchSubmit.addEventListener('click', runSearch);
+searchClear.addEventListener('click', clearSearch);
+searchInput.addEventListener('keydown', e => {
+  if (e.key === 'Enter') runSearch();
+  if (e.key === 'Escape') clearSearch();
 });
 
 // ── state overlay ─────────────────────────────────────────────────────────────

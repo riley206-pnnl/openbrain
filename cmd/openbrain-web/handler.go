@@ -79,6 +79,7 @@ func serveHTTP(ctx context.Context, cfg *config.Config, b *brain.Brain, embedder
 	})
 
 	mux.HandleFunc("/api/search", apiSearch(b))
+	mux.HandleFunc("/api/search/nodes", apiSearchNodes(b))
 	mux.HandleFunc("/api/capture", apiCapture(b))
 	mux.HandleFunc("/api/stats", apiStats(b))
 	mux.HandleFunc("/api/review", apiReview(b))
@@ -173,6 +174,68 @@ func apiSearch(b *brain.Brain) http.HandlerFunc {
 		}
 
 		jsonResponse(w, map[string]string{"result": result})
+	}
+}
+
+// apiSearchNodes returns search results as a JSON array with full node metadata
+// (id, score, type, tags, summary, content) so the graph page can highlight
+// matching nodes by their UUID. Unlike /api/search it does not format results
+// as a human-readable string.
+func apiSearchNodes(b *brain.Brain) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		query := r.URL.Query().Get("q")
+		if query == "" {
+			http.Error(w, "missing q parameter", http.StatusBadRequest)
+			return
+		}
+
+		rows, err := b.Search(r.Context(), query, brain.SearchOpts{Mode: "hybrid"})
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		type nodeResult struct {
+			ID        string   `json:"id"`
+			Score     float64  `json:"score"`
+			Type      string   `json:"type"`
+			Tags      []string `json:"tags"`
+			Summary   string   `json:"summary"`
+			Content   string   `json:"content"`
+			CreatedAt string   `json:"created_at"`
+		}
+
+		results := make([]nodeResult, 0, len(rows))
+		for _, row := range rows {
+			summary := ""
+			if row.Summary != nil {
+				summary = *row.Summary
+			}
+			score := 0.0
+			if row.Score != nil {
+				score = *row.Score
+			}
+			// Truncate content for the panel preview; full text is in the tooltip.
+			content := row.Content
+			if len(content) > 200 {
+				content = content[:200] + "…"
+			}
+			tags := row.Tags
+			if tags == nil {
+				tags = []string{}
+			}
+			results = append(results, nodeResult{
+				ID:        row.ID,
+				Score:     score,
+				Type:      row.ThoughtType,
+				Tags:      tags,
+				Summary:   summary,
+				Content:   content,
+				CreatedAt: row.CreatedAt.Format("2006-01-02"),
+			})
+		}
+
+		jsonResponse(w, results)
 	}
 }
 

@@ -37,3 +37,9 @@ viz/brain/brain.html
 
 # Claude
 .claude/
+
+# VS Code workspace files
+*.code-workspace
+
+# macOS launchd plists (deploy-specific, not tracked)
+deploy/*.plist
