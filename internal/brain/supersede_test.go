@@ -362,6 +362,38 @@ func TestSupersede_SearchNoMatchFallsBackToCapture(t *testing.T) {
 	assert.Contains(t, msg, "Captured")
 }
 
+// TestSupersede_RejectsEmptyContentBeforeEmbed asserts empty new-thought
+// content is refused before the embedder is ever called.
+func TestSupersede_RejectsEmptyContentBeforeEmbed(t *testing.T) {
+	called := false
+	b := &Brain{embedder: trackingEmbedder{&called}}
+
+	_, err := b.Supersede(context.Background(), intent.ParsedIntent{Text: "  "}, "test")
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrEmptyText)
+	assert.False(t, called, "the embedder must not be called when content is empty")
+}
+
+// TestSupersede_RejectsEmptySupersedeQueryBeforeEmbed asserts an empty
+// supersedes_query is refused before it is embedded, even though the new
+// content itself is valid and its own embed call already succeeded.
+func TestSupersede_RejectsEmptySupersedeQueryBeforeEmbed(t *testing.T) {
+	emptyQuery := "   "
+	b := &Brain{embedder: staticEmbedder{}}
+	b.supersedeFn = func(context.Context, db.SupersedeParams) (string, error) {
+		t.Fatal("supersedeFn must not run when the supersedes_query is empty")
+		return "", nil
+	}
+
+	parsed := intent.ParsedIntent{
+		Text:           "valid new content",
+		SupersedeQuery: &emptyQuery,
+	}
+	_, err := b.Supersede(context.Background(), parsed, "test")
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrEmptyText)
+}
+
 // TestSupersede_SearchMatchFound covers the resolveSupersedeTarget branch
 // where the search finds a prior match: Supersede must retire exactly that
 // matched thought.
