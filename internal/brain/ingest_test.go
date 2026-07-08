@@ -16,6 +16,7 @@ import (
 	"github.com/windingriverholdings/openbrain/internal/db"
 	"github.com/windingriverholdings/openbrain/internal/docparse"
 	"github.com/windingriverholdings/openbrain/internal/extract"
+	"github.com/windingriverholdings/openbrain/internal/intent"
 )
 
 func TestIngestDocument_DetectsFormat(t *testing.T) {
@@ -362,6 +363,38 @@ func TestIngestChunks_MidDocumentChunkFailureDoesNotAbortSiblings(t *testing.T) 
 	for _, c := range stored {
 		assert.NotContains(t, c, "BOOM", "the failed chunk's content must never be persisted")
 	}
+}
+
+// TestCaptureExtracted_RejectsEmptyCandidateContent is the Wren LOW
+// follow-up: captureExtracted's embed loop must refuse an empty-content
+// candidate explicitly, not rely solely on extract.ExtractThoughts' own
+// upstream filtering (extract.go) as an implicit guarantee. A synthetic
+// empty candidate is injected past that filter via the extractFn seam, so
+// this test exercises captureExtracted's own guard directly, proving a
+// future extractFn swap cannot reopen the OB-049 empty-input bug at this
+// embed site.
+func TestCaptureExtracted_RejectsEmptyCandidateContent(t *testing.T) {
+	b := New(nil, staticEmbedder{}, &config.Config{})
+	bulkCalled := false
+	b.bulkInsertFn = func(_ context.Context, _ []db.ThoughtInput) ([]string, error) {
+		bulkCalled = true
+		return nil, nil
+	}
+	b.extractFn = func(_ context.Context, _ string) ([]extract.Candidate, error) {
+		return []extract.Candidate{
+			{Content: "a real candidate", ThoughtType: "note"},
+			{Content: "   ", ThoughtType: "note"}, // synthetic: bypasses extract.go's own filter
+		}, nil
+	}
+
+	parsed := intent.ParsedIntent{Text: "source text", ThoughtType: "note"}
+	result, err := b.DeepCapture(context.Background(), parsed, "test")
+
+	require.Error(t, err, "an empty candidate must be refused, not silently embedded or dropped")
+	assert.Empty(t, result)
+	assert.ErrorIs(t, err, ErrEmptyText)
+	assert.Contains(t, err.Error(), "candidate 1", "the error should identify which candidate was empty")
+	assert.False(t, bulkCalled, "the store call must never run when a candidate fails the guard")
 }
 
 func TestTruncate_RuneSafe(t *testing.T) {

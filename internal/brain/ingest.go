@@ -191,6 +191,16 @@ func captureExtracted(ctx context.Context, b *Brain, candidates []extract.Candid
 
 	inputs := make([]db.ThoughtInput, len(candidates))
 	for i, c := range candidates {
+		// extract.ExtractThoughts already filters empty-content candidates
+		// (extract.go), but that is an implicit, upstream-only guarantee: a
+		// future extractFn swap (test seam or otherwise) could reintroduce
+		// an empty-content candidate here. Guarding explicitly at this embed
+		// site too keeps the chokepoint pattern uniform with Capture,
+		// Search, and Supersede, rather than depending on a caller to
+		// remember the filtering contract.
+		if err := requireNonEmptyText("extract candidate", c.Content); err != nil {
+			return nil, fmt.Errorf("candidate %d: %w", i, err)
+		}
 		embedding, err := b.embedder.Embed(ctx, c.Content)
 		if err != nil {
 			return nil, fmt.Errorf("embed %q: %w", truncate(c.Content, 30), err)
