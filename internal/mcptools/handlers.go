@@ -212,8 +212,8 @@ func mcpSupersede(b *brain.Brain) server.ToolHandlerFunc {
 			Tags:        tags,
 		}
 
-		if q := stringArg(args, "supersedes_query", ""); q != "" {
-			parsed.SupersedeQuery = &q
+		if q := supersedeQueryArg(args, "supersedes_query"); q != nil {
+			parsed.SupersedeQuery = q
 		}
 		if id := stringArg(args, "old_thought_id", ""); id != "" {
 			parsed.OldThoughtID = &id
@@ -253,6 +253,25 @@ func mcpIngestDocument(b *brain.Brain, cfg *config.Config) server.ToolHandlerFun
 
 		return toolText(result), nil
 	}
+}
+
+// supersedeQueryArg extracts the optional supersedes_query argument,
+// distinguishing an ABSENT key (nil: Supersede falls back silently to
+// searching by the new content's own embedding, the documented default)
+// from a PRESENT key (non-nil, even when its value is empty or
+// whitespace-only: Supersede's requireNonEmptyText guard then refuses it
+// loudly, same as any other explicit-but-blank input). stringArg's
+// `v != ""` fallback rule cannot make this distinction: it collapses
+// "absent" and "present but empty" into the same silent fallback, which
+// let an explicit supersedes_query:"" bypass the guard a whitespace-only
+// value already hit (OB-049 follow-up).
+func supersedeQueryArg(args map[string]any, key string) *string {
+	raw, present := args[key]
+	if !present {
+		return nil
+	}
+	q, _ := raw.(string)
+	return &q
 }
 
 // extractOnly calls the extract package without capturing.

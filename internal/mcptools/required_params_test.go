@@ -121,6 +121,55 @@ func TestMcpSupersede_EmptyContentReturnsDistinctError(t *testing.T) {
 	assert.Contains(t, text, "empty")
 }
 
+// TestMcpSupersede_ExplicitEmptySupersedesQueryIsRefusedLoud is the Wren
+// MEDIUM follow-up: an explicitly present but empty supersedes_query must be
+// refused by the same guard a whitespace-only value already hits, not
+// silently fall back to the absent-key default (searching by the new
+// content's own embedding). content is valid so its own embed succeeds via
+// stubEmbedder; the rejection must happen in resolveSupersedeTarget, before
+// any search or supersede DB call runs (b.pool is nil here, so reaching
+// either would panic instead of returning a clean error).
+func TestMcpSupersede_ExplicitEmptySupersedesQueryIsRefusedLoud(t *testing.T) {
+	b := brain.New(nil, stubEmbedder{}, &config.Config{})
+	handler := mcpSupersede(b)
+
+	result, err := handler(context.Background(), toolRequest(map[string]any{
+		"content":          "valid new content",
+		"supersedes_query": "",
+	}))
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.True(t, result.IsError, "an explicit empty supersedes_query must be refused, not silently ignored")
+	text := resultText(t, result)
+	assert.NotContains(t, text, "ollama")
+	assert.Contains(t, text, "empty")
+}
+
+// --- supersedeQueryArg ---
+
+func TestSupersedeQueryArg_AbsentKeyReturnsNil(t *testing.T) {
+	q := supersedeQueryArg(map[string]any{}, "supersedes_query")
+	assert.Nil(t, q, "an absent key must fall back silently, so it must stay nil")
+}
+
+func TestSupersedeQueryArg_PresentEmptyStringReturnsNonNilPointer(t *testing.T) {
+	q := supersedeQueryArg(map[string]any{"supersedes_query": ""}, "supersedes_query")
+	require.NotNil(t, q, "an explicitly present empty string must not collapse to the absent-key case")
+	assert.Equal(t, "", *q)
+}
+
+func TestSupersedeQueryArg_PresentWhitespaceReturnsPointer(t *testing.T) {
+	q := supersedeQueryArg(map[string]any{"supersedes_query": "   "}, "supersedes_query")
+	require.NotNil(t, q)
+	assert.Equal(t, "   ", *q)
+}
+
+func TestSupersedeQueryArg_PresentNonEmptyReturnsPointer(t *testing.T) {
+	q := supersedeQueryArg(map[string]any{"supersedes_query": "find this"}, "supersedes_query")
+	require.NotNil(t, q)
+	assert.Equal(t, "find this", *q)
+}
+
 // --- mcpIngestDocument ---
 
 func TestMcpIngestDocument_MissingFilePathNamesKey(t *testing.T) {
