@@ -56,7 +56,7 @@ func GetThoughtByID(ctx context.Context, p *pgxpool.Pool, id string) (*model.Tho
 		       tags, source, created_at,
 		       NULL::float8 AS score
 		FROM thoughts
-		WHERE id = $1::uuid`,
+		WHERE id = $1::uuid AND is_current = TRUE`,
 		id,
 	)
 	if err != nil {

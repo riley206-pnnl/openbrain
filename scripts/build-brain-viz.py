@@ -345,16 +345,24 @@ def load_config(script_dir: Path, repo_root: Path) -> dict:
 
 
 def resolve_ollama_model(cfg: dict) -> str:
-    """Return the Ollama model to use for cluster labeling.
+    """Return the Ollama model for cluster labeling.
 
-    Falls back to 'gemma3', the app's built-in default, so a stock install
-    works without any explicit model configuration.
+    Checks OPENBRAIN_EXTRACT_MODEL_FAST, then OPENBRAIN_EXTRACT_MODEL, then
+    OPENBRAIN_CHAT_MODEL (in that order). Exits with an error if none is set;
+    pass --no-llm to skip cluster labeling without needing any model var.
     """
-    return (
+    model = (
         cfg.get("OPENBRAIN_EXTRACT_MODEL_FAST") or
         cfg.get("OPENBRAIN_EXTRACT_MODEL") or
-        "gemma3"
+        cfg.get("OPENBRAIN_CHAT_MODEL")
     )
+    if not model:
+        sys.exit(
+            "error: set one of OPENBRAIN_EXTRACT_MODEL_FAST, "
+            "OPENBRAIN_EXTRACT_MODEL, or OPENBRAIN_CHAT_MODEL in .env "
+            "(or pass --no-llm to skip cluster labeling)"
+        )
+    return model
 
 
 def label_clusters(
@@ -421,8 +429,20 @@ def build_standalone_html(data_json: str, graph_html_path: Path) -> str:
         "const res = await fetch('/brain.json' + location.search);",
         "// standalone mode: data is inlined below\n    const res = { ok: true, json: async () => __STANDALONE_DATA__ };",
     )
+    # Escape characters that could break out of an inline <script> block:
+    # </script> terminates the element; < and > risk misparse; & starts entity
+    # sequences; U+2028/U+2029 are JS line-terminators not allowed in strings.
+    # \uXXXX escapes are valid in JS string literals and decode transparently.
+    safe_json = (
+        data_json
+        .replace("&", "\u0026")
+        .replace("<", "\u003c")
+        .replace(">", "\u003e")
+        .replace(" ", r" ")
+        .replace(" ", r" ")
+    )
     # Inject the data constant before the closing </body> tag.
-    injection = f'<script>const __STANDALONE_DATA__ = {data_json};</script>'
+    injection = f'<script>const __STANDALONE_DATA__ = {safe_json};</script>'
     renderer = renderer.replace("</body>", f"{injection}\n</body>", 1)
     return renderer
 

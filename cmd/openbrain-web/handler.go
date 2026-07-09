@@ -82,14 +82,14 @@ func serveHTTP(ctx context.Context, cfg *config.Config, b *brain.Brain, embedder
 		fmt.Fprint(w, "ok")
 	})
 
-	mux.HandleFunc("/api/rebuild-viz", apiRebuildViz(cfg))
-	mux.HandleFunc("/api/search", apiSearch(b))
-	mux.HandleFunc("/api/search/nodes", apiSearchNodes(b))
-	mux.HandleFunc("/api/thought/", apiGetThought(b))
-	mux.HandleFunc("/api/capture", apiCapture(b))
-	mux.HandleFunc("/api/stats", apiStats(b))
-	mux.HandleFunc("/api/review", apiReview(b))
-	mux.HandleFunc("/api/ingest", apiIngest(b, cfg))
+	mux.Handle("/api/rebuild-viz", staticAuth(cfg.WebWSToken, apiRebuildViz(cfg)))
+	mux.Handle("/api/search", staticAuth(cfg.WebWSToken, apiSearch(b)))
+	mux.Handle("/api/search/nodes", staticAuth(cfg.WebWSToken, apiSearchNodes(b)))
+	mux.Handle("/api/thought/", staticAuth(cfg.WebWSToken, apiGetThought(b)))
+	mux.Handle("/api/capture", staticAuth(cfg.WebWSToken, apiCapture(b)))
+	mux.Handle("/api/stats", staticAuth(cfg.WebWSToken, apiStats(b)))
+	mux.Handle("/api/review", staticAuth(cfg.WebWSToken, apiReview(b)))
+	mux.Handle("/api/ingest", staticAuth(cfg.WebWSToken, apiIngest(b, cfg)))
 
 	upgrader := newUpgrader(cfg.WebAllowedOrigins)
 	mux.HandleFunc("/ws", wsHandler(b, upgrader, cfg.WebWSToken))
@@ -493,21 +493,13 @@ func brainJSONHandler(staticSub fs.FS, vizOutputPath string) http.Handler {
 
 // apiRebuildViz runs the build-brain-viz.py script to regenerate brain.json.
 // Route: POST /api/rebuild-viz
-// Auth: same WebWSToken used for static pages (passed as ?token= query param).
+// Auth: handled by staticAuth at registration time.
 // Requires OPENBRAIN_VIZ_SCRIPT_PATH and OPENBRAIN_VIZ_OUTPUT_PATH to be set.
 func apiRebuildViz(cfg *config.Config) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
-		}
-
-		if cfg.WebWSToken != "" {
-			qToken := r.URL.Query().Get("token")
-			if subtle.ConstantTimeCompare([]byte(qToken), []byte(cfg.WebWSToken)) != 1 {
-				http.Error(w, "unauthorized", http.StatusUnauthorized)
-				return
-			}
 		}
 
 		if cfg.VizScriptPath == "" || cfg.VizOutputPath == "" {
