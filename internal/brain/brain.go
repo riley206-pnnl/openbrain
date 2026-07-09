@@ -310,6 +310,10 @@ func (b *Brain) resolveSupersedeTarget(ctx context.Context, parsed intent.Parsed
 // DeepCapture extracts multiple thoughts from long text via LLM.
 // Uses the shared captureExtracted helper (also used by DeepCaptureWithMeta).
 func (b *Brain) DeepCapture(ctx context.Context, parsed intent.ParsedIntent, source string) (string, error) {
+	if err := requireNonEmptyText("deep_capture", parsed.Text); err != nil {
+		return "", err
+	}
+
 	candidates, err := b.extractFn(ctx, parsed.Text)
 	if err != nil {
 		// Loud fallback: still persist the raw note (never lose the user's

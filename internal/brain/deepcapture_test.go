@@ -14,6 +14,46 @@ import (
 	"github.com/windingriverholdings/openbrain/internal/intent"
 )
 
+// TestDeepCapture_RejectsWhitespaceOnlyTextBeforeExtract asserts that
+// whitespace-only text is rejected as an input-validation failure before
+// extractFn is ever called. This mirrors the same guard on Capture, Search,
+// and Supersede (OB-049).
+func TestDeepCapture_RejectsWhitespaceOnlyTextBeforeExtract(t *testing.T) {
+	b := New(nil, nil, nil)
+
+	// Track whether extractFn fires; it must not for invalid input.
+	var extractCalled bool
+	b.extractFn = func(_ context.Context, _ string) ([]extract.Candidate, error) {
+		extractCalled = true
+		return nil, nil
+	}
+
+	cases := []struct {
+		name string
+		text string
+	}{
+		{"empty string", ""},
+		{"spaces only", "   "},
+		{"tab and newline", "\t\n"},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			extractCalled = false
+			parsed := intent.ParsedIntent{Text: tc.text, ThoughtType: "note"}
+			msg, err := b.DeepCapture(context.Background(), parsed, "test")
+
+			require.Error(t, err, "whitespace-only input must return an error")
+			assert.ErrorIs(t, err, ErrEmptyText,
+				"error must be ErrEmptyText, not a backend-attributed error")
+			assert.Empty(t, msg, "no confirmation string on validation failure")
+			assert.False(t, extractCalled,
+				"extractFn must not be called when input is whitespace-only")
+		})
+	}
+}
+
 // TestDeepCapture_ExtractionFailureIsLoud pins the loud-fallback contract:
 // when ExtractThoughts returns a real error (e.g. ErrEmptyCompletion from an
 // Ollama outage or empty completion), DeepCapture must STILL persist the raw
