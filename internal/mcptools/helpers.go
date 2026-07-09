@@ -1,6 +1,8 @@
 package mcptools
 
 import (
+	"log/slog"
+
 	"github.com/mark3labs/mcp-go/mcp"
 )
 
@@ -17,6 +19,23 @@ func toolError(text string) *mcp.CallToolResult {
 		Content: []mcp.Content{mcp.NewTextContent(text)},
 		IsError: true,
 	}
+}
+
+// requireString extracts a required string argument by key. On success it
+// returns the value with ok=true. On failure (key absent, or present with
+// the wrong type) it logs the rejection server-side (tool and key only, no
+// payload) and returns a caller-safe error result naming the key, so the
+// caller never has to guess which argument was missing. The log message
+// follows the "<tool> tool: <what happened>" prefix style already used by
+// the other write-path log lines in handlers.go (e.g. "bulk_import tool:
+// store failed", "extract_thoughts tool: auto-capture failed").
+func requireString(tool string, request mcp.CallToolRequest, key string) (string, *mcp.CallToolResult, bool) {
+	val, err := request.RequireString(key)
+	if err != nil {
+		slog.Warn(tool+" tool: rejected required argument", "key", key, "error", err)
+		return "", toolError(err.Error()), false
+	}
+	return val, nil, true
 }
 
 // stringArg extracts a string from the args map, returning fallback if absent.
