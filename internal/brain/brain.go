@@ -178,7 +178,7 @@ func (b *Brain) Search(ctx context.Context, query string, opts SearchOpts) ([]mo
 	case "vector":
 		return db.SearchThoughts(ctx, b.pool, embedding, b.cfg.SearchTopK, opts.ThoughtType, opts.Tags, threshold)
 	default:
-		return db.HybridSearchThoughts(ctx, b.pool, query, embedding, b.cfg.SearchTopK, 0.3, 0.7, threshold, opts.IncludeHistory, opts.ThoughtType)
+		return db.HybridSearchThoughts(ctx, b.pool, query, embedding, b.cfg.SearchTopK, 0.3, 0.7, threshold, opts.IncludeHistory, opts.ThoughtType, b.cfg.EmbeddingDim)
 	}
 }
 
