@@ -77,7 +77,7 @@ func TestSupersedeCapture_DirectRepro(t *testing.T) {
 
 	// Default search (is_current = TRUE) must return the new thought and not
 	// the retired one.
-	results, err := SearchThoughts(ctx, pool, testEmbedding, 10, "", nil, -1)
+	results, err := SearchThoughts(ctx, pool, testEmbedding, 10, "", nil, -1, nil, nil)
 	require.NoError(t, err)
 	var ids []string
 	for _, r := range results {

@@ -108,6 +108,72 @@
     .controls input[type=range] { width: 70px; accent-color: var(--accent); }
     .sep { width: 1px; height: 16px; background: var(--border); }
 
+    /* ── timeline range control ── */
+    .timeline-wrap {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .timeline-slider-wrap {
+      position: relative;
+      width: 140px;
+      height: 20px;
+    }
+    .timeline-slider-wrap input[type=range] {
+      position: absolute;
+      width: 100%;
+      pointer-events: none;
+      -webkit-appearance: none;
+      appearance: none;
+      height: 4px;
+      background: transparent;
+      top: 50%;
+      transform: translateY(-50%);
+    }
+    .timeline-slider-wrap input[type=range]::-webkit-slider-thumb {
+      pointer-events: all;
+      -webkit-appearance: none;
+      appearance: none;
+      width: 14px;
+      height: 14px;
+      border-radius: 50%;
+      background: var(--accent);
+      cursor: pointer;
+      border: 2px solid var(--bg);
+    }
+    .timeline-slider-wrap input[type=range]::-moz-range-thumb {
+      pointer-events: all;
+      width: 14px;
+      height: 14px;
+      border-radius: 50%;
+      background: var(--accent);
+      cursor: pointer;
+      border: 2px solid var(--bg);
+    }
+    .timeline-track {
+      position: absolute;
+      height: 4px;
+      background: var(--border);
+      border-radius: 2px;
+      top: 50%;
+      transform: translateY(-50%);
+      left: 0;
+      right: 0;
+      pointer-events: none;
+    }
+    .timeline-track-fill {
+      position: absolute;
+      height: 100%;
+      background: var(--accent-dim);
+      border-radius: 2px;
+    }
+    .timeline-label {
+      font-size: 0.7rem;
+      color: var(--text-dim);
+      white-space: nowrap;
+      min-width: 140px;
+    }
+
     /* ── main area ── */
     .main {
       flex: 1 1 auto;
@@ -524,6 +590,19 @@
   </label>
   <div class="sep"></div>
   <button class="btn" id="btn-reset" title="Double-click canvas to reset too">Reset view</button>
+  <div class="sep"></div>
+  <button class="btn" id="btn-rebuild" title="Re-run build-brain-viz.py to regenerate brain.json">Rebuild map</button>
+  <div class="sep"></div>
+  <div class="timeline-wrap" id="timeline-wrap" style="display:none">
+    <span style="font-size:0.75rem;color:var(--text-dim)">Timeline</span>
+    <div class="timeline-slider-wrap" id="timeline-slider-wrap">
+      <div class="timeline-track"><div class="timeline-track-fill" id="timeline-track-fill"></div></div>
+      <input type="range" id="range-from" min="0" max="1000" value="0" step="1" aria-label="Timeline start"/>
+      <input type="range" id="range-to"   min="0" max="1000" value="1000" step="1" aria-label="Timeline end"/>
+    </div>
+    <span class="timeline-label" id="timeline-label">all time</span>
+    <button class="btn" id="btn-timeline-reset" title="Show all time">All</button>
+  </div>
 </div>
 
 <div class="main">
@@ -610,6 +689,32 @@ let transform = { x: 0, y: 0, k: 1 };
 let hoveredNode = null;
 let drag = null;
 
+// Timeline state — epoch-ms; null = unbounded (show all).
+let dateMin = null, dateMax = null;
+// Full extent of the loaded data.
+let dataDateMin = null, dataDateMax = null;
+
+// Parse Postgres text timestamp to epoch-ms.
+// Handles formats like "2026-06-18 09:47:14.990875-07" where the timezone
+// offset has no minutes (e.g. -07 instead of -07:00), which Date.parse rejects.
+function parseTS(s) {
+  if (!s) return 0;
+  // Replace space with T, then fix bare hour-only tz offsets (+HH or -HH) → +HH:00.
+  let norm = s.replace(' ', 'T');
+  norm = norm.replace(/([+-])(\d{2})$/, '$1$2:00');
+  const ms = Date.parse(norm);
+  return isNaN(ms) ? 0 : ms;
+}
+
+// Format epoch-ms as YYYY-MM-DD for display and API params.
+function fmtDate(ms) {
+  const d = new Date(ms);
+  const y = d.getUTCFullYear();
+  const m = String(d.getUTCMonth() + 1).padStart(2, '0');
+  const day = String(d.getUTCDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
+}
+
 // Search highlight state — empty set means "no active search" (normal render).
 let highlightedIds = new Set();
 let scoreById = {};  // id → score (0–1)
@@ -652,7 +757,10 @@ function toScreen(ux, uy) {
 
 // ── visibility ────────────────────────────────────────────────────────────────
 function visible(n) {
-  return !hiddenClusters.has(n.cluster) && activeTypes.has(n.type);
+  return !hiddenClusters.has(n.cluster)
+      && activeTypes.has(n.type)
+      && (dateMin === null || n._t >= dateMin)
+      && (dateMax === null || n._t <= dateMax);
 }
 
 // ── render ────────────────────────────────────────────────────────────────────
@@ -819,6 +927,104 @@ function resetView() {
 }
 canvas.addEventListener('dblclick', resetView);
 document.getElementById('btn-reset').addEventListener('click', resetView);
+
+// ── timeline ──────────────────────────────────────────────────────────────────
+const rangeFrom      = document.getElementById('range-from');
+const rangeTo        = document.getElementById('range-to');
+const timelineLabel  = document.getElementById('timeline-label');
+const timelineWrap   = document.getElementById('timeline-wrap');
+const trackFill      = document.getElementById('timeline-track-fill');
+
+function initTimeline() {
+  if (dataDateMin === dataDateMax) {
+    // Only one day of data — hide the control; nothing useful to scrub.
+    timelineWrap.style.display = 'none';
+    return;
+  }
+  timelineWrap.style.display = '';
+  rangeFrom.value = '0';
+  rangeTo.value   = '1000';
+  updateTimelineLabel();
+  updateTrackFill();
+}
+
+function updateTimelineLabel() {
+  const isFullRange = (dateMin <= dataDateMin && dateMax >= dataDateMax);
+  if (isFullRange) {
+    timelineLabel.textContent = 'all time';
+  } else {
+    timelineLabel.textContent = fmtDate(dateMin) + ' → ' + fmtDate(dateMax);
+  }
+}
+
+function updateTrackFill() {
+  const fromPct = Number(rangeFrom.value) / 10;  // 0–100
+  const toPct   = Number(rangeTo.value) / 10;
+  trackFill.style.left  = fromPct + '%';
+  trackFill.style.width = (toPct - fromPct) + '%';
+}
+
+function msFromSlider(val) {
+  // Linear interpolation between dataDateMin and dataDateMax.
+  return dataDateMin + (val / 1000) * (dataDateMax - dataDateMin);
+}
+
+rangeFrom.addEventListener('input', () => {
+  // Keep from ≤ to.
+  if (Number(rangeFrom.value) > Number(rangeTo.value)) {
+    rangeFrom.value = rangeTo.value;
+  }
+  dateMin = msFromSlider(Number(rangeFrom.value));
+  updateTimelineLabel();
+  updateTrackFill();
+  scheduleRender();
+});
+
+rangeTo.addEventListener('input', () => {
+  // Keep to ≥ from.
+  if (Number(rangeTo.value) < Number(rangeFrom.value)) {
+    rangeTo.value = rangeFrom.value;
+  }
+  dateMax = msFromSlider(Number(rangeTo.value));
+  updateTimelineLabel();
+  updateTrackFill();
+  scheduleRender();
+});
+
+document.getElementById('btn-timeline-reset').addEventListener('click', () => {
+  rangeFrom.value = '0';
+  rangeTo.value   = '1000';
+  dateMin = dataDateMin;
+  dateMax = dataDateMax;
+  updateTimelineLabel();
+  updateTrackFill();
+  scheduleRender();
+});
+
+// ── rebuild map ───────────────────────────────────────────────────────────────
+document.getElementById('btn-rebuild').addEventListener('click', async function() {
+  const btn = this;
+  btn.disabled = true;
+  btn.textContent = 'Rebuilding…';
+  const token = new URLSearchParams(location.search).get('token') || '';
+  const url = '/api/rebuild-viz' + (token ? '?token=' + encodeURIComponent(token) : '');
+  try {
+    const res = await fetch(url, { method: 'POST' });
+    if (!res.ok) {
+      const msg = await res.text();
+      alert('Rebuild failed: ' + msg);
+      return;
+    }
+    btn.textContent = 'Reloading…';
+    DATA = null;
+    await loadData();
+  } catch (err) {
+    alert('Rebuild error: ' + err.message);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Rebuild map';
+  }
+});
 
 // ── legend ────────────────────────────────────────────────────────────────────
 function buildLegend() {
@@ -1013,7 +1219,13 @@ async function runSearch() {
   searchSubmit.disabled = true;
 
   try {
-    const res = await fetch('/api/search/nodes?q=' + encodeURIComponent(q));
+    const isFullRange = !dataDateMin || (dateMin <= dataDateMin && dateMax >= dataDateMax);
+    let searchURL = '/api/search/nodes?q=' + encodeURIComponent(q);
+    if (!isFullRange) {
+      searchURL += '&from=' + encodeURIComponent(fmtDate(dateMin));
+      searchURL += '&to='   + encodeURIComponent(fmtDate(dateMax));
+    }
+    const res = await fetch(searchURL);
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const rows = await res.json();
 
@@ -1109,6 +1321,22 @@ async function loadData() {
     }
 
     activeTypes = new Set(DATA.meta.thought_types);
+
+    // Cache parsed timestamps on each node once so visible() stays cheap.
+    DATA.nodes.forEach(n => { n._t = parseTS(n.created_at); });
+
+    // Derive data extent (nodes arrive sorted by created_at).
+    if (DATA.nodes.length > 0) {
+      dataDateMin = DATA.nodes[0]._t;
+      dataDateMax = DATA.nodes[DATA.nodes.length - 1]._t;
+    } else {
+      dataDateMin = dataDateMax = Date.now();
+    }
+    // Reset the active window to the full extent on (re)load.
+    dateMin = dataDateMin;
+    dateMax = dataDateMax;
+    initTimeline();
+
     hideState();
     buildLegend();
     buildTypePills();

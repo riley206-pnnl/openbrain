@@ -9,8 +9,11 @@ import (
 	"io/fs"
 	"log/slog"
 	"net/http"
+	"os"
+	"os/exec"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/gorilla/websocket"
 
@@ -73,11 +76,13 @@ func serveHTTP(ctx context.Context, cfg *config.Config, b *brain.Brain, embedder
 	}
 	mux.Handle("/", staticAuth(cfg.WebWSToken, http.FileServer(http.FS(staticSub))))
 	mux.Handle("/graph", staticAuth(cfg.WebWSToken, graphHandler(staticSub)))
+	mux.Handle("/brain.json", staticAuth(cfg.WebWSToken, brainJSONHandler(staticSub, cfg.VizOutputPath)))
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		fmt.Fprint(w, "ok")
 	})
 
+	mux.HandleFunc("/api/rebuild-viz", apiRebuildViz(cfg))
 	mux.HandleFunc("/api/search", apiSearch(b))
 	mux.HandleFunc("/api/search/nodes", apiSearchNodes(b))
 	mux.HandleFunc("/api/thought/", apiGetThought(b))
@@ -190,7 +195,28 @@ func apiSearchNodes(b *brain.Brain) http.HandlerFunc {
 			return
 		}
 
-		rows, err := b.Search(r.Context(), query, brain.SearchOpts{Mode: "hybrid"})
+		opts := brain.SearchOpts{Mode: "hybrid"}
+
+		if from := r.URL.Query().Get("from"); from != "" {
+			t, err := time.Parse("2006-01-02", from)
+			if err != nil {
+				http.Error(w, "invalid from date: use YYYY-MM-DD", http.StatusBadRequest)
+				return
+			}
+			opts.CreatedFrom = &t
+		}
+		if to := r.URL.Query().Get("to"); to != "" {
+			t, err := time.Parse("2006-01-02", to)
+			if err != nil {
+				http.Error(w, "invalid to date: use YYYY-MM-DD", http.StatusBadRequest)
+				return
+			}
+			// Use end-of-day so the to-date is inclusive.
+			eod := t.Add(24*time.Hour - time.Nanosecond)
+			opts.CreatedTo = &eod
+		}
+
+		rows, err := b.Search(r.Context(), query, opts)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -445,4 +471,62 @@ func wsHandler(b *brain.Brain, upgrader websocket.Upgrader, authToken string) ht
 func jsonResponse(w http.ResponseWriter, data any) {
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(data)
+}
+
+// brainJSONHandler serves brain.json from disk when vizOutputPath is set,
+// falling back to the embedded copy otherwise. Serving from disk lets the
+// rebuild endpoint update the file without restarting the server.
+func brainJSONHandler(staticSub fs.FS, vizOutputPath string) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if vizOutputPath != "" {
+			data, err := os.ReadFile(vizOutputPath)
+			if err == nil {
+				w.Header().Set("Content-Type", "application/json")
+				w.Write(data)
+				return
+			}
+			slog.Warn("brain.json: disk read failed, falling back to embedded", "path", vizOutputPath, "error", err)
+		}
+		http.ServeFileFS(w, r, staticSub, "brain.json")
+	})
+}
+
+// apiRebuildViz runs the build-brain-viz.py script to regenerate brain.json.
+// Route: POST /api/rebuild-viz
+// Auth: same WebWSToken used for static pages (passed as ?token= query param).
+// Requires OPENBRAIN_VIZ_SCRIPT_PATH and OPENBRAIN_VIZ_OUTPUT_PATH to be set.
+func apiRebuildViz(cfg *config.Config) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		if cfg.WebWSToken != "" {
+			qToken := r.URL.Query().Get("token")
+			if subtle.ConstantTimeCompare([]byte(qToken), []byte(cfg.WebWSToken)) != 1 {
+				http.Error(w, "unauthorized", http.StatusUnauthorized)
+				return
+			}
+		}
+
+		if cfg.VizScriptPath == "" || cfg.VizOutputPath == "" {
+			http.Error(w, "OPENBRAIN_VIZ_SCRIPT_PATH and OPENBRAIN_VIZ_OUTPUT_PATH must be set to enable rebuild", http.StatusServiceUnavailable)
+			return
+		}
+
+		ctx, cancel := context.WithTimeout(r.Context(), 5*time.Minute)
+		defer cancel()
+
+		cmd := exec.CommandContext(ctx, "python3", cfg.VizScriptPath, "--output", cfg.VizOutputPath)
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			slog.Error("rebuild-viz failed", "error", err, "output", string(out))
+			http.Error(w, "rebuild failed: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		slog.Info("rebuild-viz succeeded", "output_path", cfg.VizOutputPath)
+		jsonResponse(w, map[string]string{"status": "ok"})
+	}
 }

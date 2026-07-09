@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"time"
 	"unicode"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -60,7 +61,7 @@ func New(pool *pgxpool.Pool, embedder embeddings.Embedder, cfg *config.Config) *
 		return db.SupersedeCapture(ctx, b.pool, params)
 	}
 	b.supersedeSearchFn = func(ctx context.Context, embedding []float32) ([]model.ThoughtRow, error) {
-		return db.SearchThoughts(ctx, b.pool, embedding, 1, "", nil, 0.3)
+		return db.SearchThoughts(ctx, b.pool, embedding, 1, "", nil, 0.3, nil, nil)
 	}
 	b.bulkInsertFn = func(ctx context.Context, inputs []db.ThoughtInput) ([]string, error) {
 		return db.BulkInsertThoughts(ctx, b.pool, inputs)
@@ -139,6 +140,8 @@ type SearchOpts struct {
 	ThoughtType    string
 	Tags           []string
 	IncludeHistory bool
+	CreatedFrom    *time.Time // inclusive lower bound on created_at; nil = unbounded
+	CreatedTo      *time.Time // inclusive upper bound on created_at; nil = unbounded
 }
 
 // filteredSearchMinThreshold is the default minimum score threshold used when
@@ -174,11 +177,11 @@ func (b *Brain) Search(ctx context.Context, query string, opts SearchOpts) ([]mo
 
 	switch opts.Mode {
 	case "keyword":
-		return db.KeywordSearchThoughts(ctx, b.pool, query, b.cfg.SearchTopK, opts.IncludeHistory, opts.ThoughtType)
+		return db.KeywordSearchThoughts(ctx, b.pool, query, b.cfg.SearchTopK, opts.IncludeHistory, opts.ThoughtType, opts.CreatedFrom, opts.CreatedTo)
 	case "vector":
-		return db.SearchThoughts(ctx, b.pool, embedding, b.cfg.SearchTopK, opts.ThoughtType, opts.Tags, threshold)
+		return db.SearchThoughts(ctx, b.pool, embedding, b.cfg.SearchTopK, opts.ThoughtType, opts.Tags, threshold, opts.CreatedFrom, opts.CreatedTo)
 	default:
-		return db.HybridSearchThoughts(ctx, b.pool, query, embedding, b.cfg.SearchTopK, 0.3, 0.7, threshold, opts.IncludeHistory, opts.ThoughtType)
+		return db.HybridSearchThoughts(ctx, b.pool, query, embedding, b.cfg.SearchTopK, 0.3, 0.7, threshold, opts.IncludeHistory, opts.ThoughtType, opts.CreatedFrom, opts.CreatedTo)
 	}
 }
 

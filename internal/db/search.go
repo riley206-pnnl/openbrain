@@ -3,6 +3,7 @@ package db
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -10,7 +11,7 @@ import (
 )
 
 // SearchThoughts performs cosine similarity search against thought embeddings.
-func SearchThoughts(ctx context.Context, p *pgxpool.Pool, embedding []float32, topK int, thoughtType string, tags []string, scoreThreshold float64) ([]model.ThoughtRow, error) {
+func SearchThoughts(ctx context.Context, p *pgxpool.Pool, embedding []float32, topK int, thoughtType string, tags []string, scoreThreshold float64, createdFrom, createdTo *time.Time) ([]model.ThoughtRow, error) {
 	if len(embedding) == 0 {
 		return nil, fmt.Errorf("search: empty embedding vector")
 	}
@@ -35,6 +36,18 @@ func SearchThoughts(ctx context.Context, p *pgxpool.Pool, embedding []float32, t
 	if len(tags) > 0 {
 		query += fmt.Sprintf(" AND tags && $%d", argN)
 		args = append(args, tags)
+		argN++
+	}
+
+	if createdFrom != nil {
+		query += fmt.Sprintf(" AND created_at >= $%d", argN)
+		args = append(args, *createdFrom)
+		argN++
+	}
+
+	if createdTo != nil {
+		query += fmt.Sprintf(" AND created_at <= $%d", argN)
+		args = append(args, *createdTo)
 		argN++
 	}
 
@@ -64,7 +77,8 @@ func SearchThoughts(ctx context.Context, p *pgxpool.Pool, embedding []float32, t
 
 // HybridSearchThoughts performs combined keyword (BM25) + semantic (cosine) search.
 // thoughtType filters results to a specific thought_type; pass "" to skip filtering.
-func HybridSearchThoughts(ctx context.Context, p *pgxpool.Pool, queryText string, embedding []float32, topK int, keywordWeight, semanticWeight, scoreThreshold float64, includeHistory bool, thoughtType string) ([]model.ThoughtRow, error) {
+// createdFrom/createdTo optionally bound results by created_at; pass nil for no limit.
+func HybridSearchThoughts(ctx context.Context, p *pgxpool.Pool, queryText string, embedding []float32, topK int, keywordWeight, semanticWeight, scoreThreshold float64, includeHistory bool, thoughtType string, createdFrom, createdTo *time.Time) ([]model.ThoughtRow, error) {
 	if len(embedding) == 0 {
 		return nil, fmt.Errorf("search: empty embedding vector")
 	}
@@ -77,15 +91,27 @@ func HybridSearchThoughts(ctx context.Context, p *pgxpool.Pool, queryText string
 		filterType = &thoughtType
 	}
 
+	// Use a larger inner match_count when a date range is active so the outer
+	// WHERE clause has more rows to filter without silently dropping recall.
+	innerK := topK * 2
+	if createdFrom != nil || createdTo != nil {
+		innerK = topK * 4
+	}
+
+	// Wrap the hybrid_search call in an outer SELECT so we can apply the date
+	// filter without modifying the stored SQL function.
 	query := `
 		SELECT id::text, content, summary, thought_type::text,
 		       tags, source, created_at, combined_score
 		FROM hybrid_search($1, $2::vector, $3, $4, $5, $6, $7, $8)
-		ORDER BY combined_score DESC LIMIT $9`
+		WHERE ($9::timestamptz IS NULL OR created_at >= $9)
+		  AND ($10::timestamptz IS NULL OR created_at <= $10)
+		ORDER BY combined_score DESC LIMIT $11`
 
 	rows, err := p.Query(ctx, query,
-		queryText, VecLiteral(embedding), topK*2,
-		keywordWeight, semanticWeight, scoreThreshold, currentOnly, filterType, topK,
+		queryText, VecLiteral(embedding), innerK,
+		keywordWeight, semanticWeight, scoreThreshold, currentOnly, filterType,
+		createdFrom, createdTo, topK,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("hybrid search: %w", err)
@@ -106,7 +132,8 @@ func HybridSearchThoughts(ctx context.Context, p *pgxpool.Pool, queryText string
 
 // KeywordSearchThoughts performs full-text keyword search using tsvector/tsquery.
 // thoughtType filters results to a specific thought_type; pass "" to skip filtering.
-func KeywordSearchThoughts(ctx context.Context, p *pgxpool.Pool, queryText string, topK int, includeHistory bool, thoughtType string) ([]model.ThoughtRow, error) {
+// createdFrom/createdTo optionally bound results by created_at; pass nil for no limit.
+func KeywordSearchThoughts(ctx context.Context, p *pgxpool.Pool, queryText string, topK int, includeHistory bool, thoughtType string, createdFrom, createdTo *time.Time) ([]model.ThoughtRow, error) {
 	query := `
 		SELECT id::text, content, summary, thought_type::text,
 		       tags, source, created_at,
@@ -124,6 +151,18 @@ func KeywordSearchThoughts(ctx context.Context, p *pgxpool.Pool, queryText strin
 	if thoughtType != "" {
 		query += fmt.Sprintf(" AND thought_type = $%d::thought_type", argN)
 		args = append(args, thoughtType)
+		argN++
+	}
+
+	if createdFrom != nil {
+		query += fmt.Sprintf(" AND created_at >= $%d", argN)
+		args = append(args, *createdFrom)
+		argN++
+	}
+
+	if createdTo != nil {
+		query += fmt.Sprintf(" AND created_at <= $%d", argN)
+		args = append(args, *createdTo)
 		argN++
 	}
 
