@@ -96,7 +96,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       # Provision the exact pinned toolchain: go1.26.4 (matching go.mod).
       # cache:false keeps the job self-contained and avoids cross-run cache
