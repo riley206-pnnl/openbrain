@@ -20,7 +20,7 @@ VERSION     := $(shell git describe --tags --always 2>/dev/null || echo dev)
 go_ldflags = -X $(VERSION_PKG).Version=$(1)
 LDFLAGS    := $(call go_ldflags,$(VERSION))
 
-.PHONY: all build build-ocr dist test test-cover test-verbose lint vet clean install fixtures setup-db viz
+.PHONY: all build build-ocr dist test test-cover test-verbose lint vet clean install fixtures setup-db viz open-web rotate-web-token
 
 ## Default: show help
 all: help
@@ -105,6 +105,52 @@ setup-db:
 viz:
 	python3 scripts/build-brain-viz.py
 
+# ---------------------------------------------------------------------------
+# Web UI token helpers (OB-058).
+#
+# openbrain-web gates /graph and / behind a `?token=` query param compared
+# exactly against OPENBRAIN_WEB_WS_TOKEN in .env. These two targets read and
+# rotate that token without hand-editing .env or hand-crafting the URL.
+#
+# ENV_FILE and HOST are overridable, e.g.:
+#   make open-web HOST=localhost:10203
+#   make rotate-web-token ENV_FILE=/path/to/.env
+ENV_FILE      ?= .env
+HOST          ?= openbrain.wr-s.net
+WEB_TOKEN_VAR := OPENBRAIN_WEB_WS_TOKEN
+
+## Print (and try to open) the tokenized web UI URL: make open-web [HOST=host[:port]]
+open-web:
+	@test -f "$(ENV_FILE)" || { echo "ERROR: $(ENV_FILE) not found" >&2; exit 1; }
+	@token=$$(sed -n 's/^$(WEB_TOKEN_VAR)=//p' "$(ENV_FILE)" | tail -n1); \
+	if [ -z "$$token" ]; then \
+		echo "ERROR: $(WEB_TOKEN_VAR) not set (or empty) in $(ENV_FILE)" >&2; \
+		exit 1; \
+	fi; \
+	encoded=$$(python3 -c "import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=''))" "$$token"); \
+	url="https://$(HOST)/graph?token=$$encoded"; \
+	echo "$$url"; \
+	if command -v xdg-open >/dev/null 2>&1; then xdg-open "$$url" >/dev/null 2>&1 & fi; \
+	true
+
+## Rotate OPENBRAIN_WEB_WS_TOKEN in .env and restart openbrain-web (invalidates old URLs)
+rotate-web-token:
+	@test -f "$(ENV_FILE)" || { echo "ERROR: $(ENV_FILE) not found" >&2; exit 1; }
+	@command -v openssl >/dev/null 2>&1 || { echo "ERROR: openssl not found" >&2; exit 1; }
+	@new_token=$$(openssl rand -base64 36 | tr -d '\n'); \
+	if grep -q "^$(WEB_TOKEN_VAR)=" "$(ENV_FILE)"; then \
+		sed -i "s|^$(WEB_TOKEN_VAR)=.*|$(WEB_TOKEN_VAR)=$$new_token|" "$(ENV_FILE)"; \
+	else \
+		printf '%s=%s\n' "$(WEB_TOKEN_VAR)" "$$new_token" >> "$(ENV_FILE)"; \
+	fi; \
+	chmod 600 "$(ENV_FILE)"; \
+	systemctl --user restart openbrain-web; \
+	encoded=$$(python3 -c "import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=''))" "$$new_token"); \
+	url="https://$(HOST)/graph?token=$$encoded"; \
+	echo "Rotated $(WEB_TOKEN_VAR); openbrain-web restarted."; \
+	echo "New URL: $$url"; \
+	echo "WARNING: previously issued token URLs (browser history, shared links) are now invalid."
+
 ## Install binaries to GOPATH/bin
 install:
 	$(GO) install -ldflags "$(LDFLAGS)" ./cmd/openbrain
@@ -142,6 +188,8 @@ help:
 	@echo "  make fixtures      Regenerate test fixtures from Python"
 	@echo "  make setup-db      Run database migrations"
 	@echo "  make viz           Generate brain map data (brain.json)"
+	@echo "  make open-web      Print/open the tokenized web UI URL"
+	@echo "  make rotate-web-token  Rotate the web UI token and restart openbrain-web"
 	@echo "  make install       Install binaries to GOPATH"
 	@echo "  make clean         Remove build artifacts"
 	@echo "  make sizes         Show binary sizes"
