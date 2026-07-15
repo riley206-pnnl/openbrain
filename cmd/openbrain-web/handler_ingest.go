@@ -56,7 +56,7 @@ const defaultUploadSource = "http-upload"
 // carried its own independent Authorization: Bearer check against
 // cfg.MCPAuthToken; that check was removed because it double-gated the route
 // on a second, unrelated secret and, when MCPAuthToken was also unset,
-// unconditionally rejected every request even with WebWSToken empty — which
+// unconditionally rejected every request even with WebWSToken empty; that
 // contradicted the open-mode posture the rest of the web surface uses.
 func apiIngest(b docIngester, cfg *config.Config) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
