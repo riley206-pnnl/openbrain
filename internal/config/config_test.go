@@ -141,12 +141,14 @@ func TestMCPAuthTokenDefaultEmpty(t *testing.T) {
 	assert.Empty(t, cfg.MCPAuthToken, "MCPAuthToken should default to empty")
 }
 
-func TestMCPHTTPEnabled_RequiresToken(t *testing.T) {
+func TestMCPHTTPEnabled_EmptyToken_RunsOpen(t *testing.T) {
 	t.Setenv("OPENBRAIN_MCP_HTTP_ENABLED", "true")
-	// No token set
-	_, err := Load()
-	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "OPENBRAIN_MCP_AUTH_TOKEN is required")
+	// No token set: conditional posture allows open mode. No OAuth issuer is
+	// required because the OAuth machinery does not mount in open mode.
+	cfg, err := Load()
+	assert.NoError(t, err)
+	assert.True(t, cfg.MCPHTTPEnabled)
+	assert.Empty(t, cfg.MCPAuthToken)
 }
 
 func TestMCPHTTPEnabled_RejectsShortToken(t *testing.T) {

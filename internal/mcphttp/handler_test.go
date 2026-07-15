@@ -80,12 +80,17 @@ func TestNewSSEHandler_PanicsOnNilBrain(t *testing.T) {
 	}, "NewSSEHandler should panic when brain is nil")
 }
 
-func TestBearerAuth_PanicsOnEmptyToken(t *testing.T) {
-	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+// Empty token is the deliberate open-mode posture: BearerAuth passes every
+// request through unauthenticated, so the MCP transport runs open.
+func TestBearerAuth_EmptyToken_PassesThrough(t *testing.T) {
+	inner := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})
 
-	assert.Panics(t, func() {
-		mcphttp.BearerAuth("", inner)
-	}, "BearerAuth should panic when token is empty")
+	handler := mcphttp.BearerAuth("", inner)
+	req := httptest.NewRequest(http.MethodGet, "/mcp", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusOK, rec.Code, "empty token should pass requests through open")
 }
