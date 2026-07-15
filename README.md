@@ -263,6 +263,18 @@ After running `setup-mcp.sh`, these tools are available in every Claude Code ses
 
 `openbrain-mcp` serves all nine tools over stdio, the standard transport for a local Claude Code integration. `openbrain-web` additionally exposes an HTTP + SSE MCP transport with OAuth 2.0 (for remote clients such as Claude.ai's connector) when `OPENBRAIN_MCP_HTTP_ENABLED=true` is set; see `.env.example` for the required token and OAuth settings. The HTTP/SSE transport deliberately excludes `ingest_document` (it reads the local filesystem, which should not be reachable from a remote client), so a remote connection exposes eight tools, not nine.
 
+### Remote MCP access (Host allowlist)
+
+A typical deployment binds `openbrain-web` to loopback (`OPENBRAIN_WEB_HOST=127.0.0.1`) and fronts it with a reverse proxy such as cloudflared, which forwards the public hostname (for example `openbrain.wr-s.net`) in the `Host` header unchanged. The MCP transport (`mark3labs/mcp-go`) validates that header as DNS rebinding protection, so the public hostname must be explicitly allowed or every remote `/mcp` and `/sse` request is rejected with 403.
+
+Set `OPENBRAIN_MCP_ALLOWED_HOSTS` to a comma-separated list of the hostnames remote clients will send, for example:
+
+```
+OPENBRAIN_MCP_ALLOWED_HOSTS=openbrain.wr-s.net
+```
+
+Loopback hosts (`localhost`, `127.0.0.1`, `::1`) are always permitted in addition to this list, so local tooling and health checks keep working with no configuration. See `.env.example` for the full entry.
+
 ---
 
 ## Talking to It
