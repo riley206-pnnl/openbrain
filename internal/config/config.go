@@ -41,7 +41,7 @@ type Config struct {
 	DBPort     int    `env:"OPENBRAIN_DB_PORT" envDefault:"5432"`
 	DBName     string `env:"OPENBRAIN_DB_NAME" envDefault:"openbrain"`
 	DBUser     string `env:"OPENBRAIN_DB_USER" envDefault:"openbrain"`
-	DBPassword string `env:"OPENBRAIN_DB_PASSWORD" envDefault:"openbrain"`
+	DBPassword string `env:"OPENBRAIN_DB_PASSWORD,required,notEmpty"`
 
 	// Embedding
 	EmbeddingModel string `env:"OPENBRAIN_EMBEDDING_MODEL" envDefault:"nomic-embed-text"`

@@ -13,25 +13,47 @@ TIMEOUT=10  # seconds to wait for host daemon
 CMD="$1"
 shift 2>/dev/null || true
 
+# Escape a string for embedding in a JSON string value: backslashes and quotes
+# first (kept as the original ordering), then tab/CR/LF turned into their JSON
+# escape sequences, then any other raw control byte (0x00-0x1F, 0x7F) is
+# stripped so the emitted JSON stays well-formed regardless of input content.
+json_escape() {
+    printf '%s' "$1" \
+        | sed 's/\\/\\\\/g; s/"/\\"/g; s/\t/\\t/g; s/\r/\\r/g' \
+        | sed ':a;N;$!ba;s/\n/\\n/g' \
+        | tr -d '\000-\010\013\014\016-\037\177'
+}
+
 # Clean up any stale files from prior run
 rm -f "$REQ" "$RESP"
 
 case "$CMD" in
     search)
         QUERY="$1"; TOP_K="${2:-5}"
+        # Validate TOP_K is numeric
+        case "$TOP_K" in
+            ''|*[!0-9]*) echo '{"ok":false,"error":"top_k must be a positive integer"}' >&2; exit 1 ;;
+        esac
+        QUERY_ESC="$(json_escape "$QUERY")"
         printf '{"cmd":"search","query":"%s","top_k":%s}' \
-            "$(echo "$QUERY" | sed 's/"/\\"/g')" "$TOP_K" > "$REQ"
+            "$QUERY_ESC" "$TOP_K" > "$REQ"
         ;;
     capture)
         CONTENT="$1"; TYPE="${2:-note}"; SOURCE="${3:-openclaw}"
+        CONTENT_ESC="$(json_escape "$CONTENT")"
+        TYPE_ESC="$(json_escape "$TYPE")"
+        SOURCE_ESC="$(json_escape "$SOURCE")"
         printf '{"cmd":"capture","content":"%s","thought_type":"%s","source":"%s"}' \
-            "$(echo "$CONTENT" | sed 's/"/\\"/g')" "$TYPE" "$SOURCE" > "$REQ"
+            "$CONTENT_ESC" "$TYPE_ESC" "$SOURCE_ESC" > "$REQ"
         ;;
     stats)
         printf '{"cmd":"stats"}' > "$REQ"
         ;;
     review)
         DAYS="${1:-7}"
+        case "$DAYS" in
+            ''|*[!0-9]*) echo '{"ok":false,"error":"days must be a positive integer"}' >&2; exit 1 ;;
+        esac
         printf '{"cmd":"review","days":%s}' "$DAYS" > "$REQ"
         ;;
     poll)

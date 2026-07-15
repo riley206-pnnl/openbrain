@@ -61,7 +61,10 @@ def load_thoughts(cfg: dict) -> list[dict]:
     port = cfg.get("OPENBRAIN_DB_PORT", "5432")
     dbname = cfg.get("OPENBRAIN_DB_NAME", "openbrain")
     user = cfg.get("OPENBRAIN_DB_USER", "openbrain")
-    password = cfg.get("OPENBRAIN_DB_PASSWORD", "openbrain")
+    password = cfg.get("OPENBRAIN_DB_PASSWORD")
+    if not password:
+        print("ERROR: OPENBRAIN_DB_PASSWORD is not set (check .env)", file=sys.stderr)
+        sys.exit(1)
 
     if host.startswith("/"):
         conn_str = f"host={host} port={port} dbname={dbname} user={user} password={password}"
