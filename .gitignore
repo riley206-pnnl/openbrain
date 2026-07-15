@@ -24,7 +24,7 @@ logs/
 # Go
 bin/
 /openbrain-web
-openbrain-mcp
+/openbrain-mcp
 coverage.out
 
 # Node (release tooling)
