@@ -94,7 +94,7 @@ func serveHTTP(ctx context.Context, cfg *config.Config, b *brain.Brain, embedder
 	upgrader := newUpgrader(cfg.WebAllowedOrigins)
 	mux.HandleFunc("/ws", wsHandler(b, upgrader, cfg.WebWSToken))
 	if cfg.WebWSToken == "" {
-		slog.Warn("WebSocket /ws running without authentication — set OPENBRAIN_WEB_WS_TOKEN to enable")
+		slog.Warn("running without authentication: /ws and all HTTP routes are open, including the write endpoints /api/capture and /api/ingest, and the data endpoints /, /graph, /brain.json, /api/search, /api/search/nodes, /api/thought/, /api/stats, /api/review, /api/rebuild-viz; set OPENBRAIN_WEB_WS_TOKEN to enable")
 	}
 
 	// Mount MCP HTTP transports when enabled
