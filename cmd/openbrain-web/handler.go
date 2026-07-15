@@ -93,63 +93,42 @@ func serveHTTP(ctx context.Context, cfg *config.Config, b *brain.Brain, embedder
 
 	upgrader := newUpgrader(cfg.WebAllowedOrigins)
 	mux.HandleFunc("/ws", wsHandler(b, upgrader, cfg.WebWSToken))
-	// Note: cfg.WebWSToken is guaranteed non-empty here. requireWebToken in
-	// main.go aborts startup before serveHTTP is ever called with an empty
-	// token, so the fail-open branches in staticAuth and wsHandler are
-	// unreachable for this binary; they are left in place because they are
-	// still exercised directly by unit tests exercising those helpers in
-	// isolation (see handler_test.go, handler_graph_test.go).
+	// Conditional auth posture: when cfg.WebWSToken is set, staticAuth and
+	// wsHandler require it via the ?token= query param on every route above;
+	// when it is empty, the whole web surface runs open. Empty is a deliberate,
+	// operator-selected posture, so warn loudly and name the exposed surface,
+	// the bind address, and the open write endpoints (disk write, capture,
+	// rebuild-viz). The loopback default bind is the backstop.
+	if cfg.WebWSToken == "" {
+		slog.Warn("web auth token unset; web surface running OPEN with no authentication",
+			"bind", cfg.WebAddr(),
+			"open_routes", []string{"/", "/graph", "/brain.json", "/api/rebuild-viz", "/api/search", "/api/search/nodes", "/api/thought/", "/api/capture", "/api/stats", "/api/review", "/api/ingest", "/ws"},
+			"open_write_endpoints", []string{"/api/ingest", "/api/capture", "/api/rebuild-viz"},
+			"remediation", "set OPENBRAIN_WEB_WS_TOKEN to require the ?token= query param on every web route")
+	}
 
-	// Mount MCP HTTP transports when enabled
-	if cfg.MCPHTTPEnabled && cfg.MCPAuthToken != "" {
+	// Mount MCP HTTP transports when enabled. Conditional auth posture: the
+	// transport mounts whenever MCP HTTP is enabled; BearerAuth requires the
+	// token when set and passes through (open) when empty. The OAuth machinery
+	// mounts only when the token is set, because it is the authorization layer
+	// for an authenticated transport and has nothing to authorize in open mode.
+	if cfg.MCPHTTPEnabled {
 		slog.Info("mounting MCP HTTP transport", "endpoints", []string{"/mcp", "/sse/"})
 		allowedHosts := cfg.MCPAllowedHostsList()
 		mux.Handle("/mcp", mcphttp.NewMCPHandler(cfg.MCPAuthToken, cfg.MCPServerName, cfg.MCPServerVersion, b, embedder, allowedHosts))
 		mux.Handle("/sse/", mcphttp.NewSSEHandler(cfg.MCPAuthToken, cfg.MCPServerName, cfg.MCPServerVersion, b, embedder, allowedHosts))
 
-		// Mount OAuth 2.0 endpoints for MCP spec compliance.
-		// The MCP spec (2025-03-26) requires authorization code flow with PKCE.
-		// Claude.ai's web MCP connector uses fallback paths (/authorize, /token,
-		// /register) regardless of what the metadata advertises.
-		slog.Info("mounting OAuth 2.0 endpoints",
-			"endpoints", []string{
-				"/.well-known/oauth-authorization-server",
-				"/.well-known/oauth-protected-resource",
-				"/authorize",
-				"/register",
-				"/token",
-			})
-		mux.HandleFunc("/.well-known/oauth-authorization-server",
-			mcphttp.OAuthMetadataHandler(cfg.OAuthIssuer))
-		mux.HandleFunc("/.well-known/oauth-protected-resource",
-			mcphttp.ProtectedResourceHandler(cfg.OAuthIssuer))
-
-		// Authorization endpoint: auto-approves and redirects with code (PKCE).
-		mux.HandleFunc("/authorize", mcphttp.AuthorizeHandler())
-
-		// Dynamic Client Registration (RFC 7591): Claude.ai registers before auth.
-		mux.Handle("/register",
-			mcphttp.SecureHeaders(
-				mcphttp.RateLimit(0.083, 3,
-					mcphttp.RegisterHandler())))
-
-		// Token endpoint: supports authorization_code grant (PKCE).
-		// Rate-limited aggressively (5 req/min = 0.083 rps, burst 3).
-		mux.Handle("/token",
-			mcphttp.SecureHeaders(
-				mcphttp.RateLimit(0.083, 3,
-					mcphttp.AuthCodeTokenHandler(cfg.MCPAuthToken))))
-
-		// Legacy token endpoint for client_credentials grant.
-		// Kept for backward compatibility with existing integrations.
-		if cfg.OAuthClientID != "" && cfg.OAuthClientSecret != "" {
-			mux.Handle("/oauth/token",
-				mcphttp.SecureHeaders(
-					mcphttp.RateLimit(0.083, 3,
-						mcphttp.OAuthTokenHandler(cfg.OAuthClientID, cfg.OAuthClientSecret, cfg.MCPAuthToken))))
+		if cfg.MCPAuthToken == "" {
+			slog.Warn("MCP HTTP transport running OPEN; OPENBRAIN_MCP_AUTH_TOKEN unset, /mcp and /sse/ accept unauthenticated requests",
+				"bind", cfg.WebAddr(),
+				"remediation", "set OPENBRAIN_MCP_AUTH_TOKEN to require a bearer token on the MCP transport")
+		} else {
+			// Mount OAuth 2.0 endpoints for MCP spec compliance.
+			// The MCP spec (2025-03-26) requires authorization code flow with PKCE.
+			// Claude.ai's web MCP connector uses fallback paths (/authorize, /token,
+			// /register) regardless of what the metadata advertises.
+			mountOAuthEndpoints(mux, cfg)
 		}
-	} else if cfg.MCPHTTPEnabled {
-		slog.Warn("MCP HTTP transport enabled but OPENBRAIN_MCP_AUTH_TOKEN is empty; transport NOT mounted")
 	}
 
 	srv := &http.Server{Addr: cfg.WebAddr(), Handler: mux}
@@ -166,6 +145,49 @@ func serveHTTP(ctx context.Context, cfg *config.Config, b *brain.Brain, embedder
 		return nil
 	}
 	return err
+}
+
+// mountOAuthEndpoints mounts the OAuth 2.0 endpoints the MCP transport needs
+// for spec compliance. It is called only when cfg.MCPAuthToken is set, so
+// cfg.OAuthIssuer is guaranteed present by validateMCPHTTP.
+func mountOAuthEndpoints(mux *http.ServeMux, cfg *config.Config) {
+	slog.Info("mounting OAuth 2.0 endpoints",
+		"endpoints", []string{
+			"/.well-known/oauth-authorization-server",
+			"/.well-known/oauth-protected-resource",
+			"/authorize",
+			"/register",
+			"/token",
+		})
+	mux.HandleFunc("/.well-known/oauth-authorization-server",
+		mcphttp.OAuthMetadataHandler(cfg.OAuthIssuer))
+	mux.HandleFunc("/.well-known/oauth-protected-resource",
+		mcphttp.ProtectedResourceHandler(cfg.OAuthIssuer))
+
+	// Authorization endpoint: auto-approves and redirects with code (PKCE).
+	mux.HandleFunc("/authorize", mcphttp.AuthorizeHandler())
+
+	// Dynamic Client Registration (RFC 7591): Claude.ai registers before auth.
+	mux.Handle("/register",
+		mcphttp.SecureHeaders(
+			mcphttp.RateLimit(0.083, 3,
+				mcphttp.RegisterHandler())))
+
+	// Token endpoint: supports authorization_code grant (PKCE).
+	// Rate-limited aggressively (5 req/min = 0.083 rps, burst 3).
+	mux.Handle("/token",
+		mcphttp.SecureHeaders(
+			mcphttp.RateLimit(0.083, 3,
+				mcphttp.AuthCodeTokenHandler(cfg.MCPAuthToken))))
+
+	// Legacy token endpoint for client_credentials grant.
+	// Kept for backward compatibility with existing integrations.
+	if cfg.OAuthClientID != "" && cfg.OAuthClientSecret != "" {
+		mux.Handle("/oauth/token",
+			mcphttp.SecureHeaders(
+				mcphttp.RateLimit(0.083, 3,
+					mcphttp.OAuthTokenHandler(cfg.OAuthClientID, cfg.OAuthClientSecret, cfg.MCPAuthToken))))
+	}
 }
 
 func apiSearch(b *brain.Brain) http.HandlerFunc {
