@@ -93,9 +93,12 @@ func serveHTTP(ctx context.Context, cfg *config.Config, b *brain.Brain, embedder
 
 	upgrader := newUpgrader(cfg.WebAllowedOrigins)
 	mux.HandleFunc("/ws", wsHandler(b, upgrader, cfg.WebWSToken))
-	if cfg.WebWSToken == "" {
-		slog.Warn("running without authentication: /ws and all HTTP routes are open, including the write endpoints /api/capture and /api/ingest, and the data endpoints /, /graph, /brain.json, /api/search, /api/search/nodes, /api/thought/, /api/stats, /api/review, /api/rebuild-viz; set OPENBRAIN_WEB_WS_TOKEN to enable")
-	}
+	// Note: cfg.WebWSToken is guaranteed non-empty here. requireWebToken in
+	// main.go aborts startup before serveHTTP is ever called with an empty
+	// token, so the fail-open branches in staticAuth and wsHandler are
+	// unreachable for this binary; they are left in place because they are
+	// still exercised directly by unit tests exercising those helpers in
+	// isolation (see handler_test.go, handler_graph_test.go).
 
 	// Mount MCP HTTP transports when enabled
 	if cfg.MCPHTTPEnabled && cfg.MCPAuthToken != "" {
