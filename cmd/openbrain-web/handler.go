@@ -9,8 +9,11 @@ import (
 	"io/fs"
 	"log/slog"
 	"net/http"
+	"os"
+	"os/exec"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/gorilla/websocket"
 
@@ -71,23 +74,31 @@ func serveHTTP(ctx context.Context, cfg *config.Config, b *brain.Brain, embedder
 	if err != nil {
 		return fmt.Errorf("static fs: %w", err)
 	}
-	mux.Handle("/", http.FileServer(http.FS(staticSub)))
+	mux.Handle("/", staticAuth(cfg.WebWSToken, http.FileServer(http.FS(staticSub))))
+	mux.Handle("/graph", staticAuth(cfg.WebWSToken, graphHandler(staticSub)))
+	mux.Handle("/brain.json", staticAuth(cfg.WebWSToken, brainJSONHandler(staticSub, cfg.VizOutputPath)))
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		fmt.Fprint(w, "ok")
 	})
 
-	mux.HandleFunc("/api/search", apiSearch(b))
-	mux.HandleFunc("/api/capture", apiCapture(b))
-	mux.HandleFunc("/api/stats", apiStats(b))
-	mux.HandleFunc("/api/review", apiReview(b))
-	mux.HandleFunc("/api/ingest", apiIngest(b, cfg))
+	mux.Handle("/api/rebuild-viz", staticAuth(cfg.WebWSToken, apiRebuildViz(cfg)))
+	mux.Handle("/api/search", staticAuth(cfg.WebWSToken, apiSearch(b)))
+	mux.Handle("/api/search/nodes", staticAuth(cfg.WebWSToken, apiSearchNodes(b)))
+	mux.Handle("/api/thought/", staticAuth(cfg.WebWSToken, apiGetThought(b)))
+	mux.Handle("/api/capture", staticAuth(cfg.WebWSToken, apiCapture(b)))
+	mux.Handle("/api/stats", staticAuth(cfg.WebWSToken, apiStats(b)))
+	mux.Handle("/api/review", staticAuth(cfg.WebWSToken, apiReview(b)))
+	mux.Handle("/api/ingest", staticAuth(cfg.WebWSToken, apiIngest(b, cfg)))
 
 	upgrader := newUpgrader(cfg.WebAllowedOrigins)
 	mux.HandleFunc("/ws", wsHandler(b, upgrader, cfg.WebWSToken))
-	if cfg.WebWSToken == "" {
-		slog.Warn("WebSocket /ws running without authentication — set OPENBRAIN_WEB_WS_TOKEN to enable")
-	}
+	// Note: cfg.WebWSToken is guaranteed non-empty here. requireWebToken in
+	// main.go aborts startup before serveHTTP is ever called with an empty
+	// token, so the fail-open branches in staticAuth and wsHandler are
+	// unreachable for this binary; they are left in place because they are
+	// still exercised directly by unit tests exercising those helpers in
+	// isolation (see handler_test.go, handler_graph_test.go).
 
 	// Mount MCP HTTP transports when enabled
 	if cfg.MCPHTTPEnabled && cfg.MCPAuthToken != "" {
@@ -175,6 +186,139 @@ func apiSearch(b *brain.Brain) http.HandlerFunc {
 	}
 }
 
+// apiSearchNodes returns search results as a JSON array with full node metadata
+// (id, score, type, tags, summary, content) so the graph page can highlight
+// matching nodes by their UUID. Unlike /api/search it does not format results
+// as a human-readable string.
+func apiSearchNodes(b *brain.Brain) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		query := r.URL.Query().Get("q")
+		if query == "" {
+			http.Error(w, "missing q parameter", http.StatusBadRequest)
+			return
+		}
+
+		opts := brain.SearchOpts{Mode: "hybrid"}
+
+		if from := r.URL.Query().Get("from"); from != "" {
+			t, err := time.Parse("2006-01-02", from)
+			if err != nil {
+				http.Error(w, "invalid from date: use YYYY-MM-DD", http.StatusBadRequest)
+				return
+			}
+			opts.CreatedFrom = &t
+		}
+		if to := r.URL.Query().Get("to"); to != "" {
+			t, err := time.Parse("2006-01-02", to)
+			if err != nil {
+				http.Error(w, "invalid to date: use YYYY-MM-DD", http.StatusBadRequest)
+				return
+			}
+			// Use end-of-day so the to-date is inclusive.
+			eod := t.Add(24*time.Hour - time.Nanosecond)
+			opts.CreatedTo = &eod
+		}
+
+		rows, err := b.Search(r.Context(), query, opts)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		type nodeResult struct {
+			ID        string   `json:"id"`
+			Score     float64  `json:"score"`
+			Type      string   `json:"type"`
+			Tags      []string `json:"tags"`
+			Summary   string   `json:"summary"`
+			Content   string   `json:"content"`
+			CreatedAt string   `json:"created_at"`
+		}
+
+		results := make([]nodeResult, 0, len(rows))
+		for _, row := range rows {
+			summary := ""
+			if row.Summary != nil {
+				summary = *row.Summary
+			}
+			score := 0.0
+			if row.Score != nil {
+				score = *row.Score
+			}
+			// Truncate content for the panel preview; full text is in the tooltip.
+			content := row.Content
+			if len(content) > 200 {
+				content = content[:200] + "…"
+			}
+			tags := row.Tags
+			if tags == nil {
+				tags = []string{}
+			}
+			results = append(results, nodeResult{
+				ID:        row.ID,
+				Score:     score,
+				Type:      row.ThoughtType,
+				Tags:      tags,
+				Summary:   summary,
+				Content:   content,
+				CreatedAt: row.CreatedAt.Format("2006-01-02"),
+			})
+		}
+
+		jsonResponse(w, results)
+	}
+}
+
+// apiGetThought returns a single thought by UUID for the detail panel.
+// Route: GET /api/thought/{uuid}
+func apiGetThought(b *brain.Brain) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		id := strings.TrimPrefix(r.URL.Path, "/api/thought/")
+		if id == "" {
+			http.Error(w, "missing thought id", http.StatusBadRequest)
+			return
+		}
+
+		thought, err := b.GetThought(r.Context(), id)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		if thought == nil {
+			http.Error(w, "thought not found", http.StatusNotFound)
+			return
+		}
+
+		type thoughtDetail struct {
+			ID        string   `json:"id"`
+			Type      string   `json:"type"`
+			Tags      []string `json:"tags"`
+			Source    string   `json:"source"`
+			Summary   string   `json:"summary"`
+			Content   string   `json:"content"`
+			CreatedAt string   `json:"created_at"`
+		}
+
+		summary := ""
+		if thought.Summary != nil {
+			summary = *thought.Summary
+		}
+		tags := thought.Tags
+		if tags == nil {
+			tags = []string{}
+		}
+		jsonResponse(w, thoughtDetail{
+			ID:        thought.ID,
+			Type:      thought.ThoughtType,
+			Tags:      tags,
+			Source:    thought.Source,
+			Summary:   summary,
+			Content:   thought.Content,
+			CreatedAt: thought.CreatedAt.Format("2006-01-02 15:04"),
+		})
+	}
+}
+
 func apiCapture(b *brain.Brain) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
@@ -254,6 +398,31 @@ type wsResponse struct {
 	ThoughtType string `json:"thought_type"`
 }
 
+// staticAuth wraps a handler so that, when authToken is non-empty, requests must
+// carry the token via the ?token= query parameter (the same mechanism used by
+// wsHandler).  When authToken is empty the handler is passed through unchanged.
+func staticAuth(authToken string, next http.Handler) http.Handler {
+	if authToken == "" {
+		return next
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		qToken := r.URL.Query().Get("token")
+		if subtle.ConstantTimeCompare([]byte(qToken), []byte(authToken)) != 1 {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// graphHandler serves graph.html at the /graph route without requiring the .html
+// suffix in the URL.
+func graphHandler(staticSub fs.FS) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.ServeFileFS(w, r, staticSub, "graph.html")
+	})
+}
+
 func wsHandler(b *brain.Brain, upgrader websocket.Upgrader, authToken string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		// When an auth token is configured, require it via query param.
@@ -305,4 +474,72 @@ func wsHandler(b *brain.Brain, upgrader websocket.Upgrader, authToken string) ht
 func jsonResponse(w http.ResponseWriter, data any) {
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(data)
+}
+
+// brainJSONHandler serves brain.json from disk when vizOutputPath is set,
+// falling back to the embedded copy otherwise. Serving from disk lets the
+// rebuild endpoint update the file without restarting the server.
+func brainJSONHandler(staticSub fs.FS, vizOutputPath string) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if vizOutputPath != "" {
+			data, err := os.ReadFile(vizOutputPath)
+			if err == nil {
+				w.Header().Set("Content-Type", "application/json")
+				w.Write(data)
+				return
+			}
+			slog.Warn("brain.json: disk read failed, falling back to embedded", "path", vizOutputPath, "error", err)
+		}
+		http.ServeFileFS(w, r, staticSub, "brain.json")
+	})
+}
+
+// vizDegradedMarker is the machine-readable line build-brain-viz.py prints to
+// stdout when every cluster fell back to heuristic labels (Ollama was
+// unreachable). The script still exits 0 in that case: the map is valid,
+// just labeled without LLM assistance, so apiRebuildViz scans the captured
+// output for this marker rather than relying on the exit code to know
+// whether the build is degraded.
+const vizDegradedMarker = "BRAIN_VIZ_DEGRADED=true"
+
+// apiRebuildViz runs the build-brain-viz.py script to regenerate brain.json.
+// Route: POST /api/rebuild-viz
+// Auth: handled by staticAuth at registration time.
+// Requires OPENBRAIN_VIZ_SCRIPT_PATH and OPENBRAIN_VIZ_OUTPUT_PATH to be set.
+func apiRebuildViz(cfg *config.Config) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		if cfg.VizScriptPath == "" || cfg.VizOutputPath == "" {
+			http.Error(w, "OPENBRAIN_VIZ_SCRIPT_PATH and OPENBRAIN_VIZ_OUTPUT_PATH must be set to enable rebuild", http.StatusServiceUnavailable)
+			return
+		}
+
+		ctx, cancel := context.WithTimeout(r.Context(), 5*time.Minute)
+		defer cancel()
+
+		cmd := exec.CommandContext(ctx, "python3", cfg.VizScriptPath, "--output", cfg.VizOutputPath)
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			slog.Error("rebuild-viz failed", "error", err, "output", string(out))
+			http.Error(w, "rebuild failed: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		// A successful exit does not mean a fully-labeled map: the script
+		// exits 0 even when every cluster fell back to heuristic labels
+		// (Ollama unreachable). Surface that degradation instead of silently
+		// discarding it, without failing a rebuild that otherwise succeeded.
+		degraded := strings.Contains(string(out), vizDegradedMarker)
+		if degraded {
+			slog.Warn("rebuild-viz succeeded with degraded cluster labels (heuristic only, LLM unreachable)",
+				"output_path", cfg.VizOutputPath, "output", string(out))
+		} else {
+			slog.Info("rebuild-viz succeeded", "output_path", cfg.VizOutputPath)
+		}
+		jsonResponse(w, map[string]any{"status": "ok", "degraded": degraded})
+	}
 }

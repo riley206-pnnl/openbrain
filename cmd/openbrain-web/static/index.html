@@ -60,6 +60,7 @@
 <header>
   <span aria-hidden="true">🧠</span>
   <h1>OpenBrain</h1>
+  <a id="graph-link" href="/graph" style="margin-left:auto;font-size:0.75rem;color:var(--text-dim);text-decoration:none;display:flex;align-items:center;gap:4px;padding:3px 9px;border:1px solid var(--border);border-radius:6px;" onmouseover="this.style.borderColor='var(--accent-dim)';this.style.color='var(--text)'" onmouseout="this.style.borderColor='var(--border)';this.style.color='var(--text-dim)'">🗺 Brain Map</a>
   <div class="status">
     <div class="dot" id="dot"></div>
     <span id="status-text">Connecting…</span>
@@ -168,7 +169,7 @@ let reconnectDelay = 1000;
 
 function connect() {
   const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-  ws = new WebSocket(proto + '//' + location.host + '/ws');
+  ws = new WebSocket(proto + '//' + location.host + '/ws' + location.search);
   ws.onopen = function() {
     dotEl.classList.add('connected');
     statusEl.textContent = 'Connected';
@@ -212,6 +213,13 @@ inputEl.addEventListener('input', function() {
   inputEl.style.height = 'auto';
   inputEl.style.height = Math.min(inputEl.scrollHeight, 120) + 'px';
 });
+
+// Forward ?token= (and any other query params) to the Brain Map link so the
+// token is carried across navigation when the server has auth enabled.
+if (location.search) {
+  var graphLink = document.getElementById('graph-link');
+  if (graphLink) { graphLink.href = '/graph' + location.search; }
+}
 </script>
 </body>
 </html>

@@ -3,6 +3,7 @@ package db
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -10,7 +11,7 @@ import (
 )
 
 // SearchThoughts performs cosine similarity search against thought embeddings.
-func SearchThoughts(ctx context.Context, p *pgxpool.Pool, embedding []float32, topK int, thoughtType string, tags []string, scoreThreshold float64) ([]model.ThoughtRow, error) {
+func SearchThoughts(ctx context.Context, p *pgxpool.Pool, embedding []float32, topK int, thoughtType string, tags []string, scoreThreshold float64, createdFrom, createdTo *time.Time) ([]model.ThoughtRow, error) {
 	if len(embedding) == 0 {
 		return nil, fmt.Errorf("search: empty embedding vector")
 	}
@@ -35,6 +36,18 @@ func SearchThoughts(ctx context.Context, p *pgxpool.Pool, embedding []float32, t
 	if len(tags) > 0 {
 		query += fmt.Sprintf(" AND tags && $%d", argN)
 		args = append(args, tags)
+		argN++
+	}
+
+	if createdFrom != nil {
+		query += fmt.Sprintf(" AND created_at >= $%d", argN)
+		args = append(args, *createdFrom)
+		argN++
+	}
+
+	if createdTo != nil {
+		query += fmt.Sprintf(" AND created_at <= $%d", argN)
+		args = append(args, *createdTo)
 		argN++
 	}
 
@@ -63,17 +76,11 @@ func SearchThoughts(ctx context.Context, p *pgxpool.Pool, embedding []float32, t
 }
 
 // buildHybridSearchQuery constructs the hybrid_search SQL with every argument
-// fully typed so the 8-arg overload resolves unambiguously, even if a legacy
-// 6-/7-arg overload is ever reintroduced (see
-// sql/010_drop_legacy_hybrid_search_overloads.sql).
-//
-// The embedding cast is dimensioned to embeddingDim — the configured
-// OPENBRAIN_EMBEDDING_DIM (default 768). The thoughts column is deliberately a
-// model-agnostic bare `vector` (migration 008), but the query cast must match
-// the active embedding model's dimension so pgvector validates dimensionality
-// and search never silently drifts to a different dim (e.g. a stray 384 model).
-// Hardcoding 768 here would break search whenever a non-768 model is configured
-// (dimension_test.go exercises 384/1024), so the dim is threaded from config.
+// fully typed so the 8-arg overload resolves unambiguously. The embedding cast
+// is dimensioned to embeddingDim (OPENBRAIN_EMBEDDING_DIM, default 768) so
+// pgvector validates dimensionality and overload resolution stays unambiguous.
+// The outer SELECT applies optional date-range filters without modifying the
+// stored SQL function.
 func buildHybridSearchQuery(embeddingDim int) string {
 	return fmt.Sprintf(`
 		SELECT id::text, content, summary, thought_type::text,
@@ -87,15 +94,18 @@ func buildHybridSearchQuery(embeddingDim int) string {
 		         $6::double precision,
 		         $7::boolean,
 		         $8::text)
-		ORDER BY combined_score DESC LIMIT $9`, embeddingDim)
+		WHERE ($9::timestamptz IS NULL OR created_at >= $9)
+		  AND ($10::timestamptz IS NULL OR created_at <= $10)
+		ORDER BY combined_score DESC LIMIT $11`, embeddingDim)
 }
 
 // HybridSearchThoughts performs combined keyword (BM25) + semantic (cosine) search.
 // thoughtType filters results to a specific thought_type; pass "" to skip filtering.
+// createdFrom/createdTo optionally bound results by created_at; pass nil for no limit.
 // embeddingDim is the active model's dimension (OPENBRAIN_EMBEDDING_DIM); the
 // embedding argument is cast to vector(embeddingDim) so pgvector validates the
 // dimension and overload resolution stays unambiguous.
-func HybridSearchThoughts(ctx context.Context, p *pgxpool.Pool, queryText string, embedding []float32, topK int, keywordWeight, semanticWeight, scoreThreshold float64, includeHistory bool, thoughtType string, embeddingDim int) ([]model.ThoughtRow, error) {
+func HybridSearchThoughts(ctx context.Context, p *pgxpool.Pool, queryText string, embedding []float32, topK int, keywordWeight, semanticWeight, scoreThreshold float64, includeHistory bool, thoughtType string, createdFrom, createdTo *time.Time, embeddingDim int) ([]model.ThoughtRow, error) {
 	if len(embedding) == 0 {
 		return nil, fmt.Errorf("search: empty embedding vector")
 	}
@@ -108,11 +118,19 @@ func HybridSearchThoughts(ctx context.Context, p *pgxpool.Pool, queryText string
 		filterType = &thoughtType
 	}
 
+	// Use a larger inner match_count when a date range is active so the outer
+	// WHERE clause has more rows to filter without silently dropping recall.
+	innerK := topK * 2
+	if createdFrom != nil || createdTo != nil {
+		innerK = topK * 4
+	}
+
 	query := buildHybridSearchQuery(embeddingDim)
 
 	rows, err := p.Query(ctx, query,
-		queryText, VecLiteral(embedding), topK*2,
-		keywordWeight, semanticWeight, scoreThreshold, currentOnly, filterType, topK,
+		queryText, VecLiteral(embedding), innerK,
+		keywordWeight, semanticWeight, scoreThreshold, currentOnly, filterType,
+		createdFrom, createdTo, topK,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("hybrid search: %w", err)
@@ -133,7 +151,8 @@ func HybridSearchThoughts(ctx context.Context, p *pgxpool.Pool, queryText string
 
 // KeywordSearchThoughts performs full-text keyword search using tsvector/tsquery.
 // thoughtType filters results to a specific thought_type; pass "" to skip filtering.
-func KeywordSearchThoughts(ctx context.Context, p *pgxpool.Pool, queryText string, topK int, includeHistory bool, thoughtType string) ([]model.ThoughtRow, error) {
+// createdFrom/createdTo optionally bound results by created_at; pass nil for no limit.
+func KeywordSearchThoughts(ctx context.Context, p *pgxpool.Pool, queryText string, topK int, includeHistory bool, thoughtType string, createdFrom, createdTo *time.Time) ([]model.ThoughtRow, error) {
 	query := `
 		SELECT id::text, content, summary, thought_type::text,
 		       tags, source, created_at,
@@ -151,6 +170,18 @@ func KeywordSearchThoughts(ctx context.Context, p *pgxpool.Pool, queryText strin
 	if thoughtType != "" {
 		query += fmt.Sprintf(" AND thought_type = $%d::thought_type", argN)
 		args = append(args, thoughtType)
+		argN++
+	}
+
+	if createdFrom != nil {
+		query += fmt.Sprintf(" AND created_at >= $%d", argN)
+		args = append(args, *createdFrom)
+		argN++
+	}
+
+	if createdTo != nil {
+		query += fmt.Sprintf(" AND created_at <= $%d", argN)
+		args = append(args, *createdTo)
 		argN++
 	}
 

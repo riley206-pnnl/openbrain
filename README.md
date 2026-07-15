@@ -177,6 +177,29 @@ Add `mybrain.local` to `/etc/hosts` if not already there:
 127.0.0.1  mybrain.local
 ```
 
+### Brain Map (`/graph`)
+
+The web UI includes a brain map that visualizes all your thoughts as a 2D similarity cloud — thoughts near each other in the map are semantically related, cluster regions are labeled by an LLM, and edges connect the most similar pairs.
+
+The map is precomputed offline. Run this whenever you want to refresh it (after capturing new thoughts, or on first use):
+
+```bash
+make viz
+make build
+```
+
+Then visit `http://mybrain.local:10203/graph`, or click **🗺 Brain Map** in the chat header.
+
+`make viz` reads the embeddings already stored in Postgres (no re-embedding), runs UMAP + HDBSCAN to project them to 2D, and calls your local Ollama instance to label each cluster using whichever of `OPENBRAIN_EXTRACT_MODEL_FAST`, `OPENBRAIN_EXTRACT_MODEL`, or `OPENBRAIN_CHAT_MODEL` is set in `.env` (checked in that order — at least one must be set or the script exits with an error). It writes the result to `cmd/openbrain-web/static/brain.json`; `make build` embeds that file into the binary. Takes roughly 30–60 seconds depending on how many thoughts you have.
+
+**Requirements** (Python packages, install once):
+
+```bash
+pip install psycopg[binary] pgvector numpy umap-learn hdbscan scikit-learn python-dotenv requests
+```
+
+The map reads your active embedding model directly from Postgres, so it works with any model (`nomic-embed-text`, `qwen3-embedding`, etc.) without any config changes.
+
 ### Telegram and Slack bots
 
 `openbrain-telegram` and `openbrain-slack` are scaffolded (config keys, systemd units) but not yet implemented: running either logs one placeholder line and exits 0. `.env.example` documents the token variables (`OPENBRAIN_TELEGRAM_BOT_TOKEN`, `OPENBRAIN_SLACK_BOT_TOKEN`, etc.) for when that lands.

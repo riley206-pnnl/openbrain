@@ -30,5 +30,16 @@ coverage.out
 # Node (release tooling)
 node_modules/
 
+# Brain map (generated — contains private thought content; run `make viz` to regenerate)
+cmd/openbrain-web/static/brain.json
+viz/brain/.venv/
+viz/brain/brain.html
+
 # Claude
 .claude/
+
+# VS Code workspace files
+*.code-workspace
+
+# macOS launchd plists (deploy-specific, not tracked)
+deploy/*.plist

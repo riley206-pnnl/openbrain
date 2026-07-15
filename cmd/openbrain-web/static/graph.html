@@ -1,0 +1,1362 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1.0"/>
+  <title>OpenBrain — Brain Map</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    :root {
+      /* ── app design tokens (match index.html) ── */
+      --bg:         #0f1117;
+      --surface:    #1a1d27;
+      --surface2:   #22263a;
+      --border:     #2e3350;
+      --accent:     #6c8ef5;
+      --accent-dim: #3d4f8a;
+      --text:       #e2e4f0;
+      --text-dim:   #7b82a8;
+      --green:      #4ade80;
+      --red:        #f87171;
+      --radius:     10px;
+      --font:       'Inter', system-ui, sans-serif;
+      --mono:       'JetBrains Mono', 'Fira Code', monospace;
+      /* ── cluster colors (validated dark categorical set) ── */
+      --c0: #3987e5;
+      --c1: #199e70;
+      --c2: #c98500;
+      --c3: #008300;
+      --c4: #9085e9;
+      --c5: #e66767;
+      --c6: #d55181;
+      --c7: #d95926;
+      --c-noise: #52514e;
+    }
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: var(--font);
+      font-size: 14px;
+      height: 100dvh;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+
+    /* ── header (mirrors index.html) ── */
+    header {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 14px 20px;
+      background: var(--surface);
+      border-bottom: 1px solid var(--border);
+      flex-shrink: 0;
+    }
+    header h1 { font-size: 1.1rem; font-weight: 600; }
+    .back-link {
+      font-size: 0.8rem;
+      color: var(--text-dim);
+      text-decoration: none;
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      padding: 3px 8px;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      transition: border-color 0.15s, color 0.15s;
+    }
+    .back-link:hover { border-color: var(--accent-dim); color: var(--text); }
+    .header-stats {
+      margin-left: auto;
+      font-size: 0.75rem;
+      color: var(--text-dim);
+    }
+
+    /* ── controls bar ── */
+    .controls {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 8px 20px;
+      background: var(--surface);
+      border-bottom: 1px solid var(--border);
+      flex-shrink: 0;
+      flex-wrap: wrap;
+    }
+    .btn {
+      background: transparent;
+      border: 1px solid var(--border);
+      color: var(--text-dim);
+      border-radius: 6px;
+      padding: 4px 10px;
+      font-size: 0.75rem;
+      font-family: var(--font);
+      cursor: pointer;
+      transition: border-color 0.15s, color 0.15s;
+    }
+    .btn:hover { border-color: var(--accent-dim); color: var(--text); }
+    .btn.active { border-color: var(--accent); color: var(--accent); }
+    .controls label {
+      font-size: 0.75rem;
+      color: var(--text-dim);
+      display: flex;
+      align-items: center;
+      gap: 5px;
+      cursor: pointer;
+    }
+    .controls input[type=range] { width: 70px; accent-color: var(--accent); }
+    .sep { width: 1px; height: 16px; background: var(--border); }
+
+    /* ── timeline range control ── */
+    .timeline-wrap {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .timeline-slider-wrap {
+      position: relative;
+      width: 140px;
+      height: 20px;
+    }
+    .timeline-slider-wrap input[type=range] {
+      position: absolute;
+      width: 100%;
+      pointer-events: none;
+      -webkit-appearance: none;
+      appearance: none;
+      height: 4px;
+      background: transparent;
+      top: 50%;
+      transform: translateY(-50%);
+    }
+    .timeline-slider-wrap input[type=range]::-webkit-slider-thumb {
+      pointer-events: all;
+      -webkit-appearance: none;
+      appearance: none;
+      width: 14px;
+      height: 14px;
+      border-radius: 50%;
+      background: var(--accent);
+      cursor: pointer;
+      border: 2px solid var(--bg);
+    }
+    .timeline-slider-wrap input[type=range]::-moz-range-thumb {
+      pointer-events: all;
+      width: 14px;
+      height: 14px;
+      border-radius: 50%;
+      background: var(--accent);
+      cursor: pointer;
+      border: 2px solid var(--bg);
+    }
+    .timeline-track {
+      position: absolute;
+      height: 4px;
+      background: var(--border);
+      border-radius: 2px;
+      top: 50%;
+      transform: translateY(-50%);
+      left: 0;
+      right: 0;
+      pointer-events: none;
+    }
+    .timeline-track-fill {
+      position: absolute;
+      height: 100%;
+      background: var(--accent-dim);
+      border-radius: 2px;
+    }
+    .timeline-label {
+      font-size: 0.7rem;
+      color: var(--text-dim);
+      white-space: nowrap;
+      min-width: 140px;
+    }
+
+    /* ── main area ── */
+    .main {
+      flex: 1 1 auto;
+      display: flex;
+      overflow: hidden;
+      min-height: 0;
+    }
+
+    /* ── canvas ── */
+    #canvas-wrap {
+      flex: 1 1 auto;
+      position: relative;
+      overflow: hidden;
+      cursor: grab;
+    }
+    #canvas-wrap.panning { cursor: grabbing; }
+    #brain-canvas { position: absolute; inset: 0; }
+
+    /* ── legend sidebar ── */
+    #legend {
+      flex: 0 0 200px;
+      overflow-y: auto;
+      padding: 14px 12px;
+      background: var(--surface);
+      border-left: 1px solid var(--border);
+    }
+    #legend h2 {
+      font-size: 0.7rem;
+      text-transform: uppercase;
+      letter-spacing: 0.07em;
+      color: var(--text-dim);
+      margin-bottom: 10px;
+    }
+    .legend-item {
+      display: flex;
+      align-items: flex-start;
+      gap: 8px;
+      margin-bottom: 8px;
+      cursor: pointer;
+      padding: 4px 5px;
+      border-radius: 6px;
+      transition: background 0.1s;
+    }
+    .legend-item:hover { background: var(--surface2); }
+    .legend-item.dimmed { opacity: 0.3; }
+    .legend-dot {
+      flex: 0 0 9px;
+      width: 9px; height: 9px;
+      border-radius: 50%;
+      margin-top: 3px;
+    }
+    .legend-label { font-size: 0.78rem; color: var(--text); line-height: 1.35; }
+    .legend-count { font-size: 0.68rem; color: var(--text-dim); }
+
+    /* ── type pills ── */
+    #type-filter {
+      padding: 7px 20px;
+      background: var(--surface);
+      border-top: 1px solid var(--border);
+      display: flex;
+      gap: 6px;
+      flex-wrap: wrap;
+      flex-shrink: 0;
+    }
+    .type-pill {
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 2px 10px;
+      font-size: 0.72rem;
+      font-family: var(--font);
+      cursor: pointer;
+      color: var(--text-dim);
+      background: transparent;
+      transition: border-color 0.12s, color 0.12s;
+      user-select: none;
+    }
+    .type-pill.active { border-color: var(--accent-dim); color: var(--text); }
+
+    /* ── tooltip ── */
+    #tooltip {
+      position: fixed;
+      background: var(--surface2);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 9px 12px;
+      max-width: 290px;
+      pointer-events: none;
+      opacity: 0;
+      transition: opacity 0.1s;
+      z-index: 100;
+      font-size: 0.78rem;
+      line-height: 1.5;
+    }
+    #tooltip.visible { opacity: 1; }
+    .tt-meta {
+      font-size: 0.68rem;
+      color: var(--text-dim);
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      margin-bottom: 4px;
+    }
+    .tt-text { color: var(--text); margin-bottom: 4px; }
+    .tt-cluster { font-size: 0.7rem; }
+
+    /* ── loading / empty states ── */
+    #state-overlay {
+      position: absolute;
+      inset: 0;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 10px;
+      color: var(--text-dim);
+      font-size: 0.85rem;
+      pointer-events: none;
+    }
+    #state-overlay .icon { font-size: 2rem; opacity: 0.4; }
+    #state-overlay p { max-width: 300px; text-align: center; line-height: 1.6; }
+    #state-overlay code {
+      font-family: var(--mono);
+      background: var(--surface2);
+      padding: 2px 6px;
+      border-radius: 4px;
+      font-size: 0.8rem;
+    }
+    #state-overlay.hidden { display: none; }
+
+    /* ── thought detail panel (slides in from right) ── */
+    #detail-panel {
+      position: fixed;
+      top: 0; right: 0; bottom: 0;
+      width: 420px;
+      background: var(--surface);
+      border-left: 1px solid var(--border);
+      display: flex;
+      flex-direction: column;
+      z-index: 300;
+      transform: translateX(100%);
+      transition: transform 0.22s ease;
+      box-shadow: -8px 0 32px rgba(0,0,0,0.45);
+    }
+    #detail-panel.open { transform: translateX(0); }
+
+    #detail-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 14px 16px;
+      border-bottom: 1px solid var(--border);
+      flex-shrink: 0;
+      gap: 10px;
+    }
+    #detail-type {
+      font-size: 0.72rem;
+      text-transform: uppercase;
+      letter-spacing: 0.07em;
+      color: var(--text-dim);
+    }
+    #detail-close {
+      background: transparent;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      color: var(--text-dim);
+      font-family: var(--font);
+      font-size: 0.8rem;
+      padding: 3px 9px;
+      cursor: pointer;
+      flex-shrink: 0;
+      transition: border-color 0.15s, color 0.15s;
+    }
+    #detail-close:hover { border-color: var(--accent-dim); color: var(--text); }
+
+    #detail-body {
+      flex: 1 1 auto;
+      overflow-y: auto;
+      padding: 16px;
+    }
+    #detail-summary {
+      font-size: 0.9rem;
+      font-weight: 600;
+      color: var(--text);
+      line-height: 1.5;
+      margin-bottom: 12px;
+    }
+    #detail-meta {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      margin-bottom: 14px;
+    }
+    .detail-tag {
+      background: var(--surface2);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 2px 8px;
+      font-size: 0.68rem;
+      color: var(--text-dim);
+    }
+    #detail-source {
+      font-size: 0.72rem;
+      color: var(--text-dim);
+      margin-bottom: 14px;
+      font-family: var(--mono);
+      word-break: break-all;
+    }
+    #detail-divider {
+      border: none;
+      border-top: 1px solid var(--border);
+      margin: 12px 0;
+    }
+    #detail-content {
+      font-size: 0.82rem;
+      color: var(--text);
+      line-height: 1.7;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+    #detail-date {
+      font-size: 0.68rem;
+      color: var(--text-dim);
+      margin-top: 16px;
+      padding-top: 12px;
+      border-top: 1px solid var(--border);
+    }
+    #detail-loading {
+      color: var(--text-dim);
+      font-size: 0.82rem;
+      text-align: center;
+      padding: 40px 0;
+    }
+
+    /* ── search chat panel (bottom-right, fixed overlay) ── */
+    #search-panel {
+      position: fixed;
+      bottom: 20px;
+      right: 20px;
+      width: 320px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      box-shadow: 0 8px 32px rgba(0,0,0,0.55);
+      display: flex;
+      flex-direction: column;
+      z-index: 200;
+      transition: height 0.18s ease;
+    }
+    #search-panel.collapsed { height: auto; }
+
+    #search-panel-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 9px 12px;
+      border-bottom: 1px solid var(--border);
+      cursor: pointer;
+      user-select: none;
+      flex-shrink: 0;
+    }
+    #search-panel-header span {
+      font-size: 0.78rem;
+      font-weight: 600;
+      color: var(--text-dim);
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+    }
+    #search-panel-toggle {
+      font-size: 0.75rem;
+      color: var(--text-dim);
+      transition: transform 0.18s;
+    }
+    #search-panel.collapsed #search-panel-toggle { transform: rotate(180deg); }
+
+    #search-panel-body {
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+    #search-panel.collapsed #search-panel-body { display: none; }
+
+    #search-results {
+      overflow-y: auto;
+      max-height: 280px;
+      padding: 6px 0;
+    }
+    .search-result-item {
+      padding: 7px 12px;
+      cursor: pointer;
+      border-bottom: 1px solid var(--border);
+      transition: background 0.1s;
+    }
+    .search-result-item:last-child { border-bottom: none; }
+    .search-result-item:hover { background: var(--surface2); }
+    .sri-meta {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 0.68rem;
+      color: var(--text-dim);
+      margin-bottom: 3px;
+    }
+    .sri-score {
+      background: var(--accent-dim);
+      color: var(--accent);
+      border-radius: 4px;
+      padding: 1px 5px;
+      font-size: 0.65rem;
+      font-family: var(--mono);
+    }
+    .sri-text {
+      font-size: 0.78rem;
+      color: var(--text);
+      line-height: 1.4;
+      display: -webkit-box;
+      -webkit-line-clamp: 2;
+      -webkit-box-orient: vertical;
+      overflow: hidden;
+    }
+    .search-empty {
+      padding: 14px 12px;
+      font-size: 0.78rem;
+      color: var(--text-dim);
+      text-align: center;
+    }
+
+    #search-panel-footer {
+      padding: 8px 10px;
+      border-top: 1px solid var(--border);
+      display: flex;
+      gap: 6px;
+      align-items: center;
+      flex-shrink: 0;
+    }
+    #search-input {
+      flex: 1;
+      background: var(--surface2);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      color: var(--text);
+      font-family: var(--font);
+      font-size: 0.8rem;
+      padding: 5px 9px;
+      outline: none;
+      transition: border-color 0.15s;
+    }
+    #search-input:focus { border-color: var(--accent-dim); }
+    #search-input::placeholder { color: var(--text-dim); }
+    #search-submit {
+      flex-shrink: 0;
+      background: var(--accent-dim);
+      border: none;
+      border-radius: 6px;
+      color: var(--accent);
+      font-family: var(--font);
+      font-size: 0.78rem;
+      padding: 5px 10px;
+      cursor: pointer;
+      transition: background 0.15s;
+    }
+    #search-submit:hover { background: var(--accent); color: var(--bg); }
+    #search-clear {
+      flex-shrink: 0;
+      background: transparent;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      color: var(--text-dim);
+      font-family: var(--font);
+      font-size: 0.78rem;
+      padding: 5px 8px;
+      cursor: pointer;
+      transition: border-color 0.15s, color 0.15s;
+    }
+    #search-clear:hover { border-color: var(--red); color: var(--red); }
+    #search-clear.hidden { display: none; }
+
+    /* ── screen-reader-only utility ── */
+    .sr-only {
+      position: absolute;
+      width: 1px; height: 1px;
+      padding: 0; margin: -1px;
+      overflow: hidden;
+      clip: rect(0,0,0,0);
+      white-space: nowrap;
+      border: 0;
+    }
+
+    /* ── legend items as buttons ── */
+    button.legend-item {
+      background: none;
+      border: none;
+      text-align: left;
+      width: 100%;
+      font-family: var(--font);
+      font-size: inherit;
+    }
+  </style>
+</head>
+<body>
+
+<header>
+  <span aria-hidden="true">🧠</span>
+  <h1>Brain Map</h1>
+  <a href="/" class="back-link">← Chat</a>
+  <span class="header-stats" id="header-stats"></span>
+</header>
+
+<div class="controls">
+  <button class="btn active" id="btn-edges">Edges</button>
+  <button class="btn active" id="btn-labels">Labels</button>
+  <div class="sep"></div>
+  <label>
+    Node size
+    <input type="range" id="node-size" min="2" max="10" value="5" step="0.5"/>
+  </label>
+  <div class="sep"></div>
+  <button class="btn" id="btn-reset" title="Double-click canvas to reset too">Reset view</button>
+  <div class="sep"></div>
+  <button class="btn" id="btn-rebuild" title="Re-run build-brain-viz.py to regenerate brain.json">Rebuild map</button>
+  <div class="sep"></div>
+  <div class="timeline-wrap" id="timeline-wrap" style="display:none">
+    <span style="font-size:0.75rem;color:var(--text-dim)">Timeline</span>
+    <div class="timeline-slider-wrap" id="timeline-slider-wrap">
+      <div class="timeline-track"><div class="timeline-track-fill" id="timeline-track-fill"></div></div>
+      <input type="range" id="range-from" min="0" max="1000" value="0" step="1" aria-label="Timeline start"/>
+      <input type="range" id="range-to"   min="0" max="1000" value="1000" step="1" aria-label="Timeline end"/>
+    </div>
+    <span class="timeline-label" id="timeline-label">all time</span>
+    <button class="btn" id="btn-timeline-reset" title="Show all time">All</button>
+  </div>
+</div>
+
+<div class="main">
+  <div id="canvas-wrap">
+    <canvas id="brain-canvas"
+      aria-label="Similarity map of captured thoughts; use the region legend and type filter buttons to explore"></canvas>
+    <p id="sr-summary" class="sr-only" aria-live="polite"></p>
+    <div id="state-overlay">
+      <div class="icon">🧠</div>
+      <p id="state-msg">Loading brain map…</p>
+    </div>
+  </div>
+  <aside id="legend">
+    <h2>Brain regions</h2>
+    <div id="legend-items"></div>
+  </aside>
+</div>
+
+<div id="type-filter"></div>
+<div id="tooltip"></div>
+
+<!-- ── thought detail panel ── -->
+<div id="detail-panel" role="dialog" aria-label="Thought detail" aria-modal="true">
+  <div id="detail-header">
+    <span id="detail-type"></span>
+    <button id="detail-close" aria-label="Close detail panel">Close ✕</button>
+  </div>
+  <div id="detail-body">
+    <p id="detail-loading">Loading…</p>
+  </div>
+</div>
+
+<!-- ── search chat panel ── -->
+<div id="search-panel" role="search" aria-label="Search memories">
+  <div id="search-panel-header" role="button" tabindex="0" aria-expanded="true"
+       aria-controls="search-panel-body">
+    <span>🔍 Search memories</span>
+    <span id="search-panel-toggle" aria-hidden="true">▼</span>
+  </div>
+  <div id="search-panel-body">
+    <div id="search-results" aria-live="polite" aria-label="Search results">
+      <p class="search-empty">Search to highlight matching nodes.</p>
+    </div>
+    <div id="search-panel-footer">
+      <input id="search-input" type="search" placeholder="Search your memories…"
+             autocomplete="off" spellcheck="false"/>
+      <button id="search-submit" title="Search (Enter)">Go</button>
+      <button id="search-clear" class="hidden" title="Clear highlights">✕</button>
+    </div>
+  </div>
+</div>
+
+<script>
+'use strict';
+(() => {
+
+const CLUSTER_COLORS = [
+  '#3987e5','#199e70','#c98500','#008300',
+  '#9085e9','#e66767','#d55181','#d95926',
+];
+const NOISE_COLOR = '#52514e';
+const TYPE_ICONS = {
+  decision:'⚖️', insight:'💡', person:'👤', meeting:'📅',
+  idea:'🔮', note:'📝', memory:'🔁',
+};
+
+function clusterColor(cid) {
+  return cid < 0 ? NOISE_COLOR : CLUSTER_COLORS[cid % CLUSTER_COLORS.length];
+}
+
+function esc(s) {
+  return String(s)
+    .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+// ── state ─────────────────────────────────────────────────────────────────────
+let DATA = null;
+let showEdges = true;
+let showLabels = true;
+let nodeR = 5;
+let hiddenClusters = new Set();
+let activeTypes = new Set();
+let transform = { x: 0, y: 0, k: 1 };
+let hoveredNode = null;
+let drag = null;
+
+// Timeline state — epoch-ms; null = unbounded (show all).
+let dateMin = null, dateMax = null;
+// Full extent of the loaded data.
+let dataDateMin = null, dataDateMax = null;
+
+// Parse Postgres text timestamp to epoch-ms.
+// Handles formats like "2026-06-18 09:47:14.990875-07" where the timezone
+// offset has no minutes (e.g. -07 instead of -07:00), which Date.parse rejects.
+function parseTS(s) {
+  if (!s) return 0;
+  // Replace space with T, then fix bare hour-only tz offsets (+HH or -HH) → +HH:00.
+  let norm = s.replace(' ', 'T');
+  norm = norm.replace(/([+-])(\d{2})$/, '$1$2:00');
+  const ms = Date.parse(norm);
+  return isNaN(ms) ? 0 : ms;
+}
+
+// Format epoch-ms as YYYY-MM-DD for display and API params.
+function fmtDate(ms) {
+  const d = new Date(ms);
+  const y = d.getUTCFullYear();
+  const m = String(d.getUTCMonth() + 1).padStart(2, '0');
+  const day = String(d.getUTCDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
+}
+
+// Search highlight state — empty set means "no active search" (normal render).
+let highlightedIds = new Set();
+let scoreById = {};  // id → score (0–1)
+
+// Coalesce multiple per-frame mutation calls into a single rAF render tick.
+let _rafPending = false;
+function scheduleRender() {
+  if (_rafPending) return;
+  _rafPending = true;
+  requestAnimationFrame(() => { _rafPending = false; render(); });
+}
+
+// ── canvas ────────────────────────────────────────────────────────────────────
+const wrap   = document.getElementById('canvas-wrap');
+const canvas = document.getElementById('brain-canvas');
+const ctx    = canvas.getContext('2d');
+let W = 0, H = 0;
+
+function resize() {
+  const dpr = window.devicePixelRatio || 1;
+  W = wrap.clientWidth;
+  H = wrap.clientHeight;
+  canvas.width  = W * dpr;
+  canvas.height = H * dpr;
+  canvas.style.width  = W + 'px';
+  canvas.style.height = H + 'px';
+  ctx.scale(dpr, dpr);
+  if (DATA) render();
+}
+
+// ── coordinate mapping ────────────────────────────────────────────────────────
+const PAD = 60;
+
+function toScreen(ux, uy) {
+  const [xMin, xMax, yMin, yMax] = DATA.meta.bounds;
+  const sx = PAD + (ux - xMin) / (xMax - xMin) * (W - 2 * PAD);
+  const sy = PAD + (uy - yMin) / (yMax - yMin) * (H - 2 * PAD);
+  return [transform.x + sx * transform.k, transform.y + sy * transform.k];
+}
+
+// ── visibility ────────────────────────────────────────────────────────────────
+function visible(n) {
+  return !hiddenClusters.has(n.cluster)
+      && activeTypes.has(n.type)
+      && (dateMin === null || n._t >= dateMin)
+      && (dateMax === null || n._t <= dateMax);
+}
+
+// ── render ────────────────────────────────────────────────────────────────────
+function render() {
+  ctx.clearRect(0, 0, W, H);
+  if (!DATA || !DATA.nodes.length) return;
+
+  if (showEdges) {
+    for (const e of DATA.edges) {
+      const na = DATA.nodes[e.s], nb = DATA.nodes[e.t];
+      if (!visible(na) || !visible(nb)) continue;
+      const [ax, ay] = toScreen(na.x, na.y);
+      const [bx, by] = toScreen(nb.x, nb.y);
+      ctx.beginPath();
+      ctx.moveTo(ax, ay);
+      ctx.lineTo(bx, by);
+      ctx.strokeStyle = `rgba(110,142,245,${0.12 + (e.w - 0.5) * 0.55})`;
+      ctx.lineWidth = 1.2;
+      ctx.stroke();
+    }
+  }
+
+  const hasHighlight = highlightedIds.size > 0;
+
+  for (const n of DATA.nodes) {
+    if (!visible(n)) continue;
+    const [sx, sy] = toScreen(n.x, n.y);
+    const isHighlighted = hasHighlight && highlightedIds.has(n.id);
+    const isHovered = hoveredNode === n;
+
+    // Alpha: during a search, non-matched nodes fade heavily; hover still boosts.
+    let alpha;
+    if (hasHighlight) {
+      alpha = isHighlighted ? 0.92 : 0.10;
+    } else {
+      alpha = isHovered ? 0.95 : (hoveredNode ? 0.35 : 0.82);
+    }
+
+    const r = isHovered ? nodeR * 1.7 : nodeR;
+
+    // Glow ring for highlighted nodes (drawn behind the fill).
+    if (isHighlighted) {
+      const glowR = r + 4 + (scoreById[n.id] || 0) * 3;
+      ctx.beginPath();
+      ctx.arc(sx, sy, glowR, 0, 2 * Math.PI);
+      ctx.strokeStyle = '#6c8ef5';  // --accent
+      ctx.lineWidth = 2;
+      ctx.globalAlpha = 0.7;
+      ctx.stroke();
+      ctx.globalAlpha = 1;
+    }
+
+    ctx.beginPath();
+    ctx.arc(sx, sy, r, 0, 2 * Math.PI);
+    ctx.fillStyle = clusterColor(n.cluster);
+    ctx.globalAlpha = alpha;
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(15,17,23,0.8)';
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+    ctx.globalAlpha = 1;
+  }
+
+  if (showLabels) {
+    ctx.font = 'bold 11px Inter, system-ui, sans-serif';
+    ctx.textAlign = 'center';
+    for (const cl of DATA.clusters) {
+      if (cl.id < 0 || hiddenClusters.has(cl.id)) continue;
+      const [cx, cy] = toScreen(cl.cx, cl.cy);
+      const tw = ctx.measureText(cl.label).width;
+      ctx.fillStyle = 'rgba(15,17,23,0.82)';
+      ctx.beginPath();
+      ctx.roundRect(cx - tw / 2 - 6, cy - 9, tw + 12, 18, 4);
+      ctx.fill();
+      ctx.fillStyle = clusterColor(cl.id);
+      ctx.fillText(cl.label, cx, cy + 4);
+    }
+  }
+}
+
+// ── tooltip ───────────────────────────────────────────────────────────────────
+const tooltip = document.getElementById('tooltip');
+
+function showTooltip(n, px, py) {
+  const cl = DATA.clusters.find(c => c.id === n.cluster);
+  const clLabel = cl ? cl.label : 'Unclustered';
+  const col = clusterColor(n.cluster);
+  const preview = (n.summary || n.content).slice(0, 220) +
+    ((n.summary || n.content).length > 220 ? '…' : '');
+  tooltip.innerHTML =
+    `<div class="tt-meta">${esc(n.type)}${n.tags.length ? ' · ' + n.tags.slice(0,3).map(esc).join(', ') : ''}</div>` +
+    `<div class="tt-text">${esc(preview)}</div>` +
+    `<div class="tt-cluster" style="color:${col}">◉ ${esc(clLabel)}</div>`;
+  let tx = px + 14, ty = py - 10;
+  if (tx + 310 > window.innerWidth) tx = px - 310;
+  if (ty + 120 > window.innerHeight) ty = py - 120;
+  tooltip.style.left = tx + 'px';
+  tooltip.style.top  = ty + 'px';
+  tooltip.classList.add('visible');
+}
+
+function hideTooltip() { tooltip.classList.remove('visible'); }
+
+// ── hit test ──────────────────────────────────────────────────────────────────
+function hitTest(px, py) {
+  let best = null, bestD2 = (nodeR * 5) ** 2;
+  for (const n of DATA.nodes) {
+    if (!visible(n)) continue;
+    const [sx, sy] = toScreen(n.x, n.y);
+    const d2 = (px - sx) ** 2 + (py - sy) ** 2;
+    if (d2 < bestD2) { bestD2 = d2; best = n; }
+  }
+  return best;
+}
+
+// ── mouse ─────────────────────────────────────────────────────────────────────
+canvas.addEventListener('mousemove', e => {
+  if (!DATA) return;
+  const rect = canvas.getBoundingClientRect();
+  const px = e.clientX - rect.left, py = e.clientY - rect.top;
+  if (drag) {
+    transform.x += e.movementX;
+    transform.y += e.movementY;
+    scheduleRender(); return;
+  }
+  const hit = hitTest(px, py);
+  if (hit !== hoveredNode) { hoveredNode = hit; scheduleRender(); }
+  if (hit) showTooltip(hit, e.clientX, e.clientY);
+  else hideTooltip();
+});
+
+canvas.addEventListener('mousedown', e => {
+  // Only start a pan on primary (left) button clicks.
+  if (e.button !== 0) return;
+  drag = true; wrap.classList.add('panning');
+});
+canvas.addEventListener('mouseup', () => {
+  drag = false; wrap.classList.remove('panning');
+});
+canvas.addEventListener('mouseleave', () => {
+  drag = false; wrap.classList.remove('panning');
+  hoveredNode = null; hideTooltip(); if (DATA) scheduleRender();
+});
+// Safety net: clear drag state on contextmenu so a right-click that opens the
+// browser menu can't leave the canvas stuck in pan mode.
+canvas.addEventListener('contextmenu', () => {
+  drag = false; wrap.classList.remove('panning');
+});
+canvas.addEventListener('wheel', e => {
+  if (!DATA) return;
+  e.preventDefault();
+  const f = e.deltaY > 0 ? 0.88 : 1.14;
+  const rect = canvas.getBoundingClientRect();
+  const mx = e.clientX - rect.left, my = e.clientY - rect.top;
+  transform.x = mx + (transform.x - mx) * f;
+  transform.y = my + (transform.y - my) * f;
+  transform.k *= f;
+  render();
+}, { passive: false });
+
+function resetView() {
+  transform = { x: 0, y: 0, k: 1 };
+  if (DATA) render();
+}
+canvas.addEventListener('dblclick', resetView);
+document.getElementById('btn-reset').addEventListener('click', resetView);
+
+// ── timeline ──────────────────────────────────────────────────────────────────
+const rangeFrom      = document.getElementById('range-from');
+const rangeTo        = document.getElementById('range-to');
+const timelineLabel  = document.getElementById('timeline-label');
+const timelineWrap   = document.getElementById('timeline-wrap');
+const trackFill      = document.getElementById('timeline-track-fill');
+
+function initTimeline() {
+  if (dataDateMin === dataDateMax) {
+    // Only one day of data — hide the control; nothing useful to scrub.
+    timelineWrap.style.display = 'none';
+    return;
+  }
+  timelineWrap.style.display = '';
+  rangeFrom.value = '0';
+  rangeTo.value   = '1000';
+  updateTimelineLabel();
+  updateTrackFill();
+}
+
+function updateTimelineLabel() {
+  const isFullRange = (dateMin <= dataDateMin && dateMax >= dataDateMax);
+  if (isFullRange) {
+    timelineLabel.textContent = 'all time';
+  } else {
+    timelineLabel.textContent = fmtDate(dateMin) + ' → ' + fmtDate(dateMax);
+  }
+}
+
+function updateTrackFill() {
+  const fromPct = Number(rangeFrom.value) / 10;  // 0–100
+  const toPct   = Number(rangeTo.value) / 10;
+  trackFill.style.left  = fromPct + '%';
+  trackFill.style.width = (toPct - fromPct) + '%';
+}
+
+function msFromSlider(val) {
+  // Linear interpolation between dataDateMin and dataDateMax.
+  return dataDateMin + (val / 1000) * (dataDateMax - dataDateMin);
+}
+
+rangeFrom.addEventListener('input', () => {
+  // Keep from ≤ to.
+  if (Number(rangeFrom.value) > Number(rangeTo.value)) {
+    rangeFrom.value = rangeTo.value;
+  }
+  dateMin = msFromSlider(Number(rangeFrom.value));
+  updateTimelineLabel();
+  updateTrackFill();
+  scheduleRender();
+});
+
+rangeTo.addEventListener('input', () => {
+  // Keep to ≥ from.
+  if (Number(rangeTo.value) < Number(rangeFrom.value)) {
+    rangeTo.value = rangeFrom.value;
+  }
+  dateMax = msFromSlider(Number(rangeTo.value));
+  updateTimelineLabel();
+  updateTrackFill();
+  scheduleRender();
+});
+
+document.getElementById('btn-timeline-reset').addEventListener('click', () => {
+  rangeFrom.value = '0';
+  rangeTo.value   = '1000';
+  dateMin = dataDateMin;
+  dateMax = dataDateMax;
+  updateTimelineLabel();
+  updateTrackFill();
+  scheduleRender();
+});
+
+// ── rebuild map ───────────────────────────────────────────────────────────────
+document.getElementById('btn-rebuild').addEventListener('click', async function() {
+  const btn = this;
+  btn.disabled = true;
+  btn.textContent = 'Rebuilding…';
+  const token = new URLSearchParams(location.search).get('token') || '';
+  const url = '/api/rebuild-viz' + (token ? '?token=' + encodeURIComponent(token) : '');
+  try {
+    const res = await fetch(url, { method: 'POST' });
+    if (!res.ok) {
+      const msg = await res.text();
+      alert('Rebuild failed: ' + msg);
+      return;
+    }
+    btn.textContent = 'Reloading…';
+    DATA = null;
+    await loadData();
+  } catch (err) {
+    alert('Rebuild error: ' + err.message);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Rebuild map';
+  }
+});
+
+// ── legend ────────────────────────────────────────────────────────────────────
+function buildLegend() {
+  const container = document.getElementById('legend-items');
+  container.innerHTML = '';
+  for (const cl of DATA.clusters) {
+    // Use <button> so each region is reachable and activatable by keyboard.
+    const btn = document.createElement('button');
+    btn.className = 'legend-item';
+    btn.setAttribute('aria-pressed', 'true');
+    btn.innerHTML =
+      `<span class="legend-dot" style="background:${clusterColor(cl.id)}"></span>` +
+      `<span><span class="legend-label">${esc(cl.label)}</span><br>` +
+      `<span class="legend-count">${cl.size} thoughts</span></span>`;
+    btn.addEventListener('click', () => {
+      if (hiddenClusters.has(cl.id)) hiddenClusters.delete(cl.id);
+      else hiddenClusters.add(cl.id);
+      btn.classList.toggle('dimmed');
+      btn.setAttribute('aria-pressed', hiddenClusters.has(cl.id) ? 'false' : 'true');
+      scheduleRender();
+    });
+    container.appendChild(btn);
+  }
+
+  // Update the screen-reader summary: list thought counts per visible region.
+  const srSummary = document.getElementById('sr-summary');
+  if (srSummary) {
+    const visible = DATA.clusters.filter(c => c.id >= 0);
+    const total = DATA.meta.n_thoughts;
+    const regions = visible.map(c => `${c.label} (${c.size})`).join(', ');
+    srSummary.textContent =
+      `Brain map: ${total} thoughts across ${visible.length} regions — ${regions}.`;
+  }
+}
+
+// ── type pills ────────────────────────────────────────────────────────────────
+function buildTypePills() {
+  const bar = document.getElementById('type-filter');
+  bar.innerHTML = '';
+  for (const tp of DATA.meta.thought_types) {
+    const btn = document.createElement('button');
+    btn.className = 'type-pill active';
+    btn.textContent = (TYPE_ICONS[tp] || '') + ' ' + tp;
+    btn.dataset.type = tp;
+    btn.addEventListener('click', () => {
+      if (activeTypes.has(tp)) {
+        if (activeTypes.size === 1) return;
+        activeTypes.delete(tp);
+        btn.classList.remove('active');
+      } else {
+        activeTypes.add(tp);
+        btn.classList.add('active');
+      }
+      render();
+    });
+    bar.appendChild(btn);
+  }
+}
+
+// ── buttons ───────────────────────────────────────────────────────────────────
+document.getElementById('btn-edges').addEventListener('click', function() {
+  showEdges = !showEdges;
+  this.classList.toggle('active', showEdges);
+  render();
+});
+document.getElementById('btn-labels').addEventListener('click', function() {
+  showLabels = !showLabels;
+  this.classList.toggle('active', showLabels);
+  render();
+});
+document.getElementById('node-size').addEventListener('input', function() {
+  nodeR = +this.value; render();
+});
+
+// ── detail panel ─────────────────────────────────────────────────────────────
+const detailPanel  = document.getElementById('detail-panel');
+const detailBody   = document.getElementById('detail-body');
+const detailType   = document.getElementById('detail-type');
+const detailClose  = document.getElementById('detail-close');
+
+function closeDetail() {
+  detailPanel.classList.remove('open');
+}
+
+detailClose.addEventListener('click', closeDetail);
+
+// Close on Escape key
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape' && detailPanel.classList.contains('open')) closeDetail();
+});
+
+async function openDetail(nodeId) {
+  detailPanel.classList.add('open');
+  detailType.textContent = '';
+  detailBody.innerHTML = '<p id="detail-loading">Loading…</p>';
+
+  try {
+    const res = await fetch(`/api/thought/${encodeURIComponent(nodeId)}`);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const t = await res.json();
+
+    const icon = TYPE_ICONS[t.type] || '📄';
+    detailType.textContent = `${icon} ${t.type}`;
+
+    const tagsHtml = t.tags.length
+      ? t.tags.map(tag => `<span class="detail-tag">${esc(tag)}</span>`).join('')
+      : '';
+    const sourceHtml = t.source
+      ? `<div id="detail-source">📂 ${esc(t.source)}</div>`
+      : '';
+    const summaryHtml = t.summary
+      ? `<div id="detail-summary">${esc(t.summary)}</div>`
+      : '';
+
+    detailBody.innerHTML =
+      summaryHtml +
+      (tagsHtml ? `<div id="detail-meta">${tagsHtml}</div>` : '') +
+      sourceHtml +
+      `<hr id="detail-divider"/>` +
+      `<div id="detail-content">${esc(t.content)}</div>` +
+      `<div id="detail-date">Captured ${esc(t.created_at)}</div>`;
+
+  } catch (err) {
+    detailBody.innerHTML =
+      `<p style="color:var(--red);font-size:0.82rem">Failed to load: ${esc(err.message)}</p>`;
+  }
+}
+
+// Canvas click — open detail for the node under the cursor (only if not dragging).
+let _mouseDownPos = null;
+canvas.addEventListener('mousedown', e => {
+  if (e.button === 0) _mouseDownPos = { x: e.clientX, y: e.clientY };
+});
+canvas.addEventListener('click', e => {
+  if (!DATA || !_mouseDownPos) return;
+  // Ignore if the mouse moved more than 4px (it was a pan, not a click).
+  const dx = e.clientX - _mouseDownPos.x, dy = e.clientY - _mouseDownPos.y;
+  if (dx * dx + dy * dy > 16) return;
+
+  const rect = canvas.getBoundingClientRect();
+  const hit = hitTest(e.clientX - rect.left, e.clientY - rect.top);
+  if (hit) openDetail(hit.id);
+});
+
+// ── pan-to-node ───────────────────────────────────────────────────────────────
+function panToNode(n) {
+  if (!DATA) return;
+  const [xMin, xMax, yMin, yMax] = DATA.meta.bounds;
+  // Compute where this node sits in "base" (pre-transform) screen space.
+  const sx = PAD + (n.x - xMin) / (xMax - xMin) * (W - 2 * PAD);
+  const sy = PAD + (n.y - yMin) / (yMax - yMin) * (H - 2 * PAD);
+  // Set transform so node ends up at viewport center.
+  transform.x = W / 2 - sx * transform.k;
+  transform.y = H / 2 - sy * transform.k;
+  render();
+}
+
+// ── search panel ─────────────────────────────────────────────────────────────
+const searchInput   = document.getElementById('search-input');
+const searchSubmit  = document.getElementById('search-submit');
+const searchClear   = document.getElementById('search-clear');
+const searchResults = document.getElementById('search-results');
+const panelHeader   = document.getElementById('search-panel-header');
+const searchPanel   = document.getElementById('search-panel');
+
+panelHeader.addEventListener('click', () => {
+  searchPanel.classList.toggle('collapsed');
+  const expanded = !searchPanel.classList.contains('collapsed');
+  panelHeader.setAttribute('aria-expanded', String(expanded));
+});
+panelHeader.addEventListener('keydown', e => {
+  if (e.key === 'Enter' || e.key === ' ') {
+    e.preventDefault();
+    panelHeader.click();
+  }
+});
+
+function clearSearch() {
+  highlightedIds = new Set();
+  scoreById = {};
+  searchResults.innerHTML = '<p class="search-empty">Search to highlight matching nodes.</p>';
+  searchClear.classList.add('hidden');
+  searchInput.value = '';
+  if (DATA) render();
+}
+
+async function runSearch() {
+  const q = searchInput.value.trim();
+  if (!q) return;
+
+  searchResults.innerHTML = '<p class="search-empty">Searching…</p>';
+  searchSubmit.disabled = true;
+
+  try {
+    const isFullRange = !dataDateMin || (dateMin <= dataDateMin && dateMax >= dataDateMax);
+    let searchURL = '/api/search/nodes?q=' + encodeURIComponent(q);
+    if (!isFullRange) {
+      searchURL += '&from=' + encodeURIComponent(fmtDate(dateMin));
+      searchURL += '&to='   + encodeURIComponent(fmtDate(dateMax));
+    }
+    const res = await fetch(searchURL);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const rows = await res.json();
+
+    highlightedIds = new Set(rows.map(r => r.id));
+    scoreById = {};
+    rows.forEach(r => { scoreById[r.id] = r.score; });
+
+    if (rows.length === 0) {
+      searchResults.innerHTML = '<p class="search-empty">No matching memories found.</p>';
+      searchClear.classList.remove('hidden');
+      if (DATA) render();
+      return;
+    }
+
+    // Build result list — only show entries that exist in the current brain.json.
+    const nodeById = DATA ? Object.fromEntries(DATA.nodes.map(n => [n.id, n])) : {};
+    let html = '';
+    for (const r of rows) {
+      const preview = (r.summary || r.content || '').slice(0, 140);
+      const icon = TYPE_ICONS[r.type] || '📄';
+      const inGraph = !!nodeById[r.id];
+      const dimClass = inGraph ? '' : ' style="opacity:0.5" title="Not in current brain.json snapshot"';
+      html +=
+        `<div class="search-result-item" data-id="${esc(r.id)}"${dimClass}>` +
+          `<div class="sri-meta">` +
+            `<span>${icon} ${esc(r.type)}</span>` +
+            `<span class="sri-score">${r.score.toFixed(2)}</span>` +
+            `<span>${esc(r.created_at)}</span>` +
+          `</div>` +
+          `<div class="sri-text">${esc(preview)}</div>` +
+        `</div>`;
+    }
+    searchResults.innerHTML = html;
+    searchClear.classList.remove('hidden');
+
+    // Pan to the top result if it exists in the graph.
+    if (DATA && nodeById[rows[0].id]) {
+      panToNode(nodeById[rows[0].id]);
+    } else if (DATA) {
+      render();
+    }
+
+    // Clicking a result pans to that node and opens the detail panel.
+    searchResults.querySelectorAll('.search-result-item').forEach(el => {
+      el.addEventListener('click', () => {
+        const id = el.dataset.id;
+        if (DATA) {
+          const node = nodeById[id];
+          if (node) panToNode(node);
+        }
+        openDetail(id);
+      });
+    });
+
+  } catch (err) {
+    searchResults.innerHTML = `<p class="search-empty" style="color:var(--red)">Error: ${esc(err.message)}</p>`;
+  } finally {
+    searchSubmit.disabled = false;
+  }
+}
+
+searchSubmit.addEventListener('click', runSearch);
+searchClear.addEventListener('click', clearSearch);
+searchInput.addEventListener('keydown', e => {
+  if (e.key === 'Enter') runSearch();
+  if (e.key === 'Escape') clearSearch();
+});
+
+// ── state overlay ─────────────────────────────────────────────────────────────
+const overlay = document.getElementById('state-overlay');
+const stateMsg = document.getElementById('state-msg');
+
+function showState(msg) {
+  stateMsg.innerHTML = msg;
+  overlay.classList.remove('hidden');
+}
+function hideState() { overlay.classList.add('hidden'); }
+
+// ── load data ─────────────────────────────────────────────────────────────────
+async function loadData() {
+  try {
+    const res = await fetch('/brain.json' + location.search);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    DATA = await res.json();
+
+    if (!DATA.nodes || DATA.nodes.length === 0) {
+      showState(
+        'No brain map data yet.<br>' +
+        'Run <code>make viz</code> from the repo root to generate it,<br>' +
+        'then rebuild and restart the server.'
+      );
+      return;
+    }
+
+    activeTypes = new Set(DATA.meta.thought_types);
+
+    // Cache parsed timestamps on each node once so visible() stays cheap.
+    DATA.nodes.forEach(n => { n._t = parseTS(n.created_at); });
+
+    // Derive data extent (nodes arrive sorted by created_at).
+    if (DATA.nodes.length > 0) {
+      dataDateMin = DATA.nodes[0]._t;
+      dataDateMax = DATA.nodes[DATA.nodes.length - 1]._t;
+    } else {
+      dataDateMin = dataDateMax = Date.now();
+    }
+    // Reset the active window to the full extent on (re)load.
+    dateMin = dataDateMin;
+    dateMax = dataDateMax;
+    initTimeline();
+
+    hideState();
+    buildLegend();
+    buildTypePills();
+
+    const m = DATA.meta;
+    document.getElementById('header-stats').textContent =
+      `${m.n_thoughts} thoughts · ${m.n_clusters} regions · ${m.n_edges} connections`;
+
+    resize();
+  } catch (err) {
+    showState(
+      `Failed to load brain.json: ${esc(err.message)}<br>` +
+      'Run <code>make viz</code> and rebuild the server.'
+    );
+  }
+}
+
+window.addEventListener('resize', resize);
+loadData();
+})();
+</script>
+</body>
+</html>

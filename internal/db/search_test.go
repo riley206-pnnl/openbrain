@@ -34,6 +34,8 @@ func TestSearchThoughts_RejectsEmptyEmbedding(t *testing.T) {
 		"",          // thoughtType
 		nil,         // tags
 		0.5,         // scoreThreshold
+		nil,         // createdFrom
+		nil,         // createdTo
 	)
 
 	assert.Error(t, err, "SearchThoughts must reject empty embeddings")
@@ -49,6 +51,8 @@ func TestSearchThoughts_RejectsNilEmbedding(t *testing.T) {
 		"",
 		nil,
 		0.5,
+		nil, // createdFrom
+		nil, // createdTo
 	)
 
 	assert.Error(t, err, "SearchThoughts must reject nil embeddings")
@@ -69,6 +73,8 @@ func TestHybridSearchThoughts_RejectsEmptyEmbedding(t *testing.T) {
 		0.5,         // scoreThreshold
 		false,       // includeHistory
 		"",          // thoughtType
+		nil,         // createdFrom
+		nil,         // createdTo
 		768,         // embeddingDim
 	)
 
@@ -88,6 +94,8 @@ func TestHybridSearchThoughts_RejectsNilEmbedding(t *testing.T) {
 		0.5,
 		false,
 		"",
+		nil, // createdFrom
+		nil, // createdTo
 		768, // embeddingDim
 	)
 

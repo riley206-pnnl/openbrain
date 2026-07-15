@@ -49,6 +49,34 @@ func GetStats(ctx context.Context, p *pgxpool.Pool) (*model.Stats, error) {
 	return s, rows.Err()
 }
 
+// GetThoughtByID returns a single thought by its UUID, or nil if not found.
+func GetThoughtByID(ctx context.Context, p *pgxpool.Pool, id string) (*model.ThoughtRow, error) {
+	rows, err := p.Query(ctx, `
+		SELECT id::text, content, summary, thought_type::text,
+		       tags, source, created_at,
+		       NULL::float8 AS score
+		FROM thoughts
+		WHERE id = $1::uuid AND is_current = TRUE`,
+		id,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("get thought by id: %w", err)
+	}
+	defer rows.Close()
+
+	if !rows.Next() {
+		if err := rows.Err(); err != nil {
+			return nil, fmt.Errorf("get thought by id: %w", err)
+		}
+		return nil, nil // not found
+	}
+	t, err := scanThought(rows)
+	if err != nil {
+		return nil, fmt.Errorf("scan thought: %w", err)
+	}
+	return &t, nil
+}
+
 // GetThoughtsSince returns all current thoughts from the past N days.
 func GetThoughtsSince(ctx context.Context, p *pgxpool.Pool, days int) ([]model.ThoughtRow, error) {
 	rows, err := p.Query(ctx, `

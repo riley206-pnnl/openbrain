@@ -115,10 +115,22 @@ type Config struct {
 
 	// External tool paths
 	MarkitdownPath string `env:"OPENBRAIN_MARKITDOWN_PATH" envDefault:"markitdown"`
+
+	// Brain visualization
+	VizScriptPath string `env:"OPENBRAIN_VIZ_SCRIPT_PATH"` // path to build-brain-viz.py; empty disables the rebuild endpoint
+	VizOutputPath string `env:"OPENBRAIN_VIZ_OUTPUT_PATH"` // path where brain.json is written and served from disk
 }
 
 // DBUrl returns the PostgreSQL connection string.
+// When DBHost starts with '/', it is a unix socket directory and the URL uses
+// the pgx host= query parameter to avoid OrbStack's localhost TCP intercept.
 func (c *Config) DBUrl() string {
+	if strings.HasPrefix(c.DBHost, "/") {
+		return fmt.Sprintf(
+			"postgres://%s:%s@/%s?host=%s&sslmode=disable",
+			c.DBUser, c.DBPassword, c.DBName, c.DBHost,
+		)
+	}
 	return fmt.Sprintf(
 		"postgres://%s:%s@%s:%d/%s?sslmode=disable",
 		c.DBUser, c.DBPassword, c.DBHost, c.DBPort, c.DBName,
