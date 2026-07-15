@@ -159,6 +159,15 @@ func TestMCPHTTPEnabled_RejectsShortToken(t *testing.T) {
 	assert.Contains(t, err.Error(), "at least 32 characters")
 }
 
+func TestMCPHTTPEnabled_Rejects31CharToken(t *testing.T) {
+	t.Setenv("OPENBRAIN_MCP_HTTP_ENABLED", "true")
+	t.Setenv("OPENBRAIN_MCP_AUTH_TOKEN", "abcdefghijklmnopqrstuvwxyz12345") // exactly 31
+	_, err := Load()
+	if assert.Error(t, err) {
+		assert.Contains(t, err.Error(), "at least 32 characters")
+	}
+}
+
 func TestMCPHTTPEnabled_Accepts32CharToken(t *testing.T) {
 	t.Setenv("OPENBRAIN_MCP_HTTP_ENABLED", "true")
 	t.Setenv("OPENBRAIN_MCP_AUTH_TOKEN", "abcdefghijklmnopqrstuvwxyz123456")
@@ -228,6 +237,15 @@ func TestWebWSToken_RejectsShortToken(t *testing.T) {
 	_, err := Load()
 	if assert.Error(t, err) {
 		assert.Contains(t, err.Error(), "OPENBRAIN_WEB_WS_TOKEN")
+		assert.Contains(t, err.Error(), "at least 32 characters")
+	}
+}
+
+func TestWebWSToken_Rejects31CharToken(t *testing.T) {
+	token := "abcdefghijklmnopqrstuvwxyz12345" // exactly 31, one under the minimum
+	t.Setenv("OPENBRAIN_WEB_WS_TOKEN", token)
+	_, err := Load()
+	if assert.Error(t, err) {
 		assert.Contains(t, err.Error(), "at least 32 characters")
 	}
 }
