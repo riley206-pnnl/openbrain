@@ -34,12 +34,12 @@ func (f *graphFileStub) Stat() (fs.FileInfo, error) { return graphFileInfo{}, ni
 
 type graphFileInfo struct{}
 
-func (graphFileInfo) Name() string      { return "graph.html" }
-func (graphFileInfo) Size() int64       { return int64(len(graphHTMLBody)) }
-func (graphFileInfo) Mode() fs.FileMode { return 0444 }
+func (graphFileInfo) Name() string       { return "graph.html" }
+func (graphFileInfo) Size() int64        { return int64(len(graphHTMLBody)) }
+func (graphFileInfo) Mode() fs.FileMode  { return 0444 }
 func (graphFileInfo) ModTime() time.Time { return time.Time{} }
-func (graphFileInfo) IsDir() bool       { return false }
-func (graphFileInfo) Sys() interface{}  { return nil }
+func (graphFileInfo) IsDir() bool        { return false }
+func (graphFileInfo) Sys() interface{}   { return nil }
 
 // ── helper ────────────────────────────────────────────────────────────────────
 

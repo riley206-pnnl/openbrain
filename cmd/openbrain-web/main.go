@@ -15,16 +15,21 @@ import (
 	"github.com/windingriverholdings/openbrain/internal/embeddings"
 )
 
-// requireWebToken enforces that a web auth token is configured before the
-// server binds any address. staticAuth and wsHandler fail open when
-// cfg.WebWSToken is empty, so an unset token used to leave every route
-// (including the write endpoints /api/capture and /api/ingest) reachable
-// with no authentication. This is now a fatal startup condition instead of
-// a warning: the openbrain-web binary refuses to start rather than serve
-// unauthenticated. There is no opt-out; set OPENBRAIN_WEB_WS_TOKEN.
+// minWebWSTokenLen is the minimum acceptable length for OPENBRAIN_WEB_WS_TOKEN.
+const minWebWSTokenLen = 32
+
+// requireWebToken enforces that a web auth token is configured, and long
+// enough to resist guessing, before the server binds any address. staticAuth
+// and wsHandler fail open when cfg.WebWSToken is empty, so an unset token
+// used to leave every route (including the write endpoints /api/capture and
+// /api/ingest) reachable with no authentication. This is now a fatal startup
+// condition instead of a warning: the openbrain-web binary refuses to start
+// rather than serve unauthenticated or under-authenticated. There is no
+// opt-out; set OPENBRAIN_WEB_WS_TOKEN to a token at least minWebWSTokenLen
+// characters long.
 func requireWebToken(cfg *config.Config) error {
-	if cfg.WebWSToken == "" {
-		return fmt.Errorf("OPENBRAIN_WEB_WS_TOKEN is empty; a web auth token is required to start openbrain-web, set OPENBRAIN_WEB_WS_TOKEN to a token at least 32 characters long")
+	if len(cfg.WebWSToken) < minWebWSTokenLen {
+		return fmt.Errorf("OPENBRAIN_WEB_WS_TOKEN is empty or too short; a web auth token is required to start openbrain-web, set OPENBRAIN_WEB_WS_TOKEN to a token at least 32 characters long")
 	}
 	return nil
 }
