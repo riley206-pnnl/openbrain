@@ -189,16 +189,22 @@ const minAuthTokenLen = 32
 // minMCPAuthTokenLen is kept as an alias for backward compatibility.
 const minMCPAuthTokenLen = minAuthTokenLen
 
-// validateMCPHTTP enforces that when MCP HTTP is enabled, a sufficiently
-// strong auth token is configured and an OAuth issuer URL is set (required
-// by the OAuth 2.0 metadata endpoints that the transport mounts).
-// Returns an error if validation fails.
+// validateMCPHTTP enforces the conditional auth posture for the MCP HTTP
+// transport. When MCP HTTP is enabled and a token is set, the token must be
+// sufficiently strong and an OAuth issuer URL must be present (the OAuth 2.0
+// metadata endpoints mount only in that case). When MCP HTTP is enabled with
+// no token, the transport runs open: this is a deliberate, operator-selected
+// posture that mirrors the web surface, and the server logs a loud startup
+// warning. Returns an error if validation fails.
 func validateMCPHTTP(c *Config) error {
 	if !c.MCPHTTPEnabled {
 		return nil
 	}
 	if c.MCPAuthToken == "" {
-		return fmt.Errorf("OPENBRAIN_MCP_AUTH_TOKEN is required when OPENBRAIN_MCP_HTTP_ENABLED=true")
+		// Open mode: no token means no OAuth machinery to validate. The
+		// server warns loudly at startup; loopback default bind is the
+		// backstop.
+		return nil
 	}
 	if len(c.MCPAuthToken) < minMCPAuthTokenLen {
 		return fmt.Errorf("OPENBRAIN_MCP_AUTH_TOKEN must be at least %d characters when OPENBRAIN_MCP_HTTP_ENABLED=true (got %d)", minMCPAuthTokenLen, len(c.MCPAuthToken))

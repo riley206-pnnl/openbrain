@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"crypto/rand"
-	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -52,16 +51,17 @@ const defaultUploadSource = "http-upload"
 //	source       (optional) caller identifier, defaults to "http-upload"
 //	auto_capture (optional) "false" disables deep-capture extraction
 //
-// Auth: Authorization: Bearer <cfg.MCPAuthToken>.
+// Auth: handled by staticAuth at registration time, identical to its sibling
+// write endpoints (/api/capture, /api/rebuild-viz). /api/ingest previously
+// carried its own independent Authorization: Bearer check against
+// cfg.MCPAuthToken; that check was removed because it double-gated the route
+// on a second, unrelated secret and, when MCPAuthToken was also unset,
+// unconditionally rejected every request even with WebWSToken empty; that
+// contradicted the open-mode posture the rest of the web surface uses.
 func apiIngest(b docIngester, cfg *config.Config) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
-
-		if !checkBearer(r, cfg.MCPAuthToken) {
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
 
@@ -130,23 +130,6 @@ func apiIngest(b docIngester, cfg *config.Config) http.HandlerFunc {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]string{"result": result})
 	}
-}
-
-// checkBearer returns true when the request's Authorization header carries
-// the configured bearer token. Uses constant-time comparison.
-// When the configured token is empty, the handler refuses every request —
-// upload is a write operation, so we fail closed rather than open.
-func checkBearer(r *http.Request, expected string) bool {
-	if expected == "" {
-		return false
-	}
-	auth := r.Header.Get("Authorization")
-	const prefix = "Bearer "
-	if !strings.HasPrefix(auth, prefix) {
-		return false
-	}
-	provided := strings.TrimPrefix(auth, prefix)
-	return subtle.ConstantTimeCompare([]byte(provided), []byte(expected)) == 1
 }
 
 // sanitizeUploadFilename returns just the basename of the caller-supplied

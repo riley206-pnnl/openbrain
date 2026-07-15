@@ -14,12 +14,16 @@ import (
 )
 
 // BearerAuth wraps an http.Handler with bearer token authentication.
-// Requests without a valid "Authorization: Bearer <token>" header
-// receive a 401 Unauthorized response.
-// Panics if token is empty — an empty token would authenticate every request.
+// When token is non-empty, requests must carry a valid
+// "Authorization: Bearer <token>" header; requests without one receive a
+// 401 Unauthorized response. When token is empty the handler is passed
+// through unchanged and the transport runs open. An empty token is a
+// deliberate, operator-selected open mode that mirrors staticAuth on the web
+// surface; the caller emits a loud startup warning before mounting an open
+// transport.
 func BearerAuth(token string, next http.Handler) http.Handler {
 	if token == "" {
-		panic("mcphttp.BearerAuth: token must not be empty")
+		return next
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		auth := r.Header.Get("Authorization")

@@ -1,44 +1,54 @@
 package main
 
 import (
-	"strings"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 
-	"github.com/windingriverholdings/openbrain/internal/config"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
-func TestRequireWebToken_EmptyToken_ReturnsError(t *testing.T) {
-	cfg := &config.Config{WebWSToken: ""}
+// staticAuth is the single gate for every web route (see serveHTTP). These
+// tests pin the conditional auth posture Craig selected: an empty WebWSToken
+// leaves the surface open with no startup abort, while a set token is required
+// via the ?token= query param on every gated route, including the write
+// endpoints (/api/capture, /api/ingest). The browser-facing /graph route has
+// its own coverage in handler_graph_test.go.
 
-	err := requireWebToken(cfg)
-
-	if err == nil {
-		t.Fatal("requireWebToken() with empty WebWSToken = nil error, want non-nil")
-	}
-	if !strings.Contains(err.Error(), "at least 32 characters long") {
-		t.Fatalf("requireWebToken() error = %q, want it to name the 32-char minimum", err.Error())
-	}
+func serveWriteEndpoint(t *testing.T, token, target string) *httptest.ResponseRecorder {
+	t.Helper()
+	inner := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	h := staticAuth(token, inner)
+	req := httptest.NewRequest(http.MethodPost, target, nil)
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	return rr
 }
 
-func TestRequireWebToken_TooShortToken_ReturnsError(t *testing.T) {
-	cfg := &config.Config{WebWSToken: "abc"}
-
-	err := requireWebToken(cfg)
-
-	if err == nil {
-		t.Fatal("requireWebToken() with a 3-char WebWSToken = nil error, want non-nil")
-	}
-	if !strings.Contains(err.Error(), "at least 32 characters long") {
-		t.Fatalf("requireWebToken() error = %q, want it to name the 32-char minimum", err.Error())
-	}
+// Empty token → the write endpoint runs open (the old fail-closed startup
+// abort is gone).
+func TestWriteEndpoint_EmptyToken_Open(t *testing.T) {
+	rr := serveWriteEndpoint(t, "", "/api/capture")
+	require.Equal(t, http.StatusOK, rr.Code)
 }
 
-func TestRequireWebToken_SetToken_ReturnsNil(t *testing.T) {
-	cfg := &config.Config{WebWSToken: "a-sufficiently-long-web-auth-token"}
+// Set token, missing ?token= → rejected.
+func TestWriteEndpoint_SetToken_MissingRejected(t *testing.T) {
+	rr := serveWriteEndpoint(t, validToken, "/api/capture")
+	assert.Equal(t, http.StatusUnauthorized, rr.Code)
+}
 
-	err := requireWebToken(cfg)
+// Set token, wrong ?token= → rejected.
+func TestWriteEndpoint_SetToken_WrongRejected(t *testing.T) {
+	rr := serveWriteEndpoint(t, validToken, "/api/capture?token=wrongtoken")
+	assert.Equal(t, http.StatusUnauthorized, rr.Code)
+}
 
-	if err != nil {
-		t.Fatalf("requireWebToken() with set WebWSToken = %v, want nil", err)
-	}
+// Set token, correct ?token= → accepted.
+func TestWriteEndpoint_SetToken_CorrectAccepted(t *testing.T) {
+	rr := serveWriteEndpoint(t, validToken, "/api/capture?token="+validToken)
+	require.Equal(t, http.StatusOK, rr.Code)
 }

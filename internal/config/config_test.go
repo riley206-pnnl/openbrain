@@ -141,12 +141,14 @@ func TestMCPAuthTokenDefaultEmpty(t *testing.T) {
 	assert.Empty(t, cfg.MCPAuthToken, "MCPAuthToken should default to empty")
 }
 
-func TestMCPHTTPEnabled_RequiresToken(t *testing.T) {
+func TestMCPHTTPEnabled_EmptyToken_RunsOpen(t *testing.T) {
 	t.Setenv("OPENBRAIN_MCP_HTTP_ENABLED", "true")
-	// No token set
-	_, err := Load()
-	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "OPENBRAIN_MCP_AUTH_TOKEN is required")
+	// No token set: conditional posture allows open mode. No OAuth issuer is
+	// required because the OAuth machinery does not mount in open mode.
+	cfg, err := Load()
+	assert.NoError(t, err)
+	assert.True(t, cfg.MCPHTTPEnabled)
+	assert.Empty(t, cfg.MCPAuthToken)
 }
 
 func TestMCPHTTPEnabled_RejectsShortToken(t *testing.T) {
@@ -155,6 +157,15 @@ func TestMCPHTTPEnabled_RejectsShortToken(t *testing.T) {
 	_, err := Load()
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "at least 32 characters")
+}
+
+func TestMCPHTTPEnabled_Rejects31CharToken(t *testing.T) {
+	t.Setenv("OPENBRAIN_MCP_HTTP_ENABLED", "true")
+	t.Setenv("OPENBRAIN_MCP_AUTH_TOKEN", "abcdefghijklmnopqrstuvwxyz12345") // exactly 31
+	_, err := Load()
+	if assert.Error(t, err) {
+		assert.Contains(t, err.Error(), "at least 32 characters")
+	}
 }
 
 func TestMCPHTTPEnabled_Accepts32CharToken(t *testing.T) {
@@ -226,6 +237,15 @@ func TestWebWSToken_RejectsShortToken(t *testing.T) {
 	_, err := Load()
 	if assert.Error(t, err) {
 		assert.Contains(t, err.Error(), "OPENBRAIN_WEB_WS_TOKEN")
+		assert.Contains(t, err.Error(), "at least 32 characters")
+	}
+}
+
+func TestWebWSToken_Rejects31CharToken(t *testing.T) {
+	token := "abcdefghijklmnopqrstuvwxyz12345" // exactly 31, one under the minimum
+	t.Setenv("OPENBRAIN_WEB_WS_TOKEN", token)
+	_, err := Load()
+	if assert.Error(t, err) {
 		assert.Contains(t, err.Error(), "at least 32 characters")
 	}
 }
