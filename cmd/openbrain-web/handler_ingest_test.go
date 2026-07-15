@@ -45,7 +45,6 @@ func (f *fakeIngester) IngestDocument(_ context.Context, filePath, source string
 func newIngestCfg(t *testing.T) *config.Config {
 	t.Helper()
 	return &config.Config{
-		MCPAuthToken:   "test-token-1234567890abcdef1234567890",
 		IngestDir:      t.TempDir(),
 		IngestMaxBytes: 1 << 20, // 1 MB cap for tests
 	}
@@ -72,33 +71,9 @@ func TestApiIngest_RejectsWrongMethod(t *testing.T) {
 	cfg := newIngestCfg(t)
 	h := apiIngest(&fakeIngester{}, cfg)
 	req := httptest.NewRequest(http.MethodGet, "/api/ingest", nil)
-	req.Header.Set("Authorization", "Bearer "+cfg.MCPAuthToken)
 	rr := httptest.NewRecorder()
 	h(rr, req)
 	assert.Equal(t, http.StatusMethodNotAllowed, rr.Code)
-}
-
-func TestApiIngest_RejectsMissingBearer(t *testing.T) {
-	cfg := newIngestCfg(t)
-	h := apiIngest(&fakeIngester{}, cfg)
-	body, ct := buildMultipart(t, "note.txt", "hello", "")
-	req := httptest.NewRequest(http.MethodPost, "/api/ingest", body)
-	req.Header.Set("Content-Type", ct)
-	rr := httptest.NewRecorder()
-	h(rr, req)
-	assert.Equal(t, http.StatusUnauthorized, rr.Code)
-}
-
-func TestApiIngest_RejectsWrongBearer(t *testing.T) {
-	cfg := newIngestCfg(t)
-	h := apiIngest(&fakeIngester{}, cfg)
-	body, ct := buildMultipart(t, "note.txt", "hello", "")
-	req := httptest.NewRequest(http.MethodPost, "/api/ingest", body)
-	req.Header.Set("Content-Type", ct)
-	req.Header.Set("Authorization", "Bearer wrong-token")
-	rr := httptest.NewRecorder()
-	h(rr, req)
-	assert.Equal(t, http.StatusUnauthorized, rr.Code)
 }
 
 func TestApiIngest_RejectsMissingFile(t *testing.T) {
@@ -107,10 +82,80 @@ func TestApiIngest_RejectsMissingFile(t *testing.T) {
 	body, ct := buildMultipart(t, "", "", "manual")
 	req := httptest.NewRequest(http.MethodPost, "/api/ingest", body)
 	req.Header.Set("Content-Type", ct)
-	req.Header.Set("Authorization", "Bearer "+cfg.MCPAuthToken)
 	rr := httptest.NewRecorder()
 	h(rr, req)
 	assert.Equal(t, http.StatusBadRequest, rr.Code)
+}
+
+// Auth is handled entirely by staticAuth at registration time (see
+// serveHTTP), identical to every other write endpoint. These tests exercise
+// the same route wrapping used in production to prove the CRITICAL fix: an
+// empty WebWSToken leaves /api/ingest genuinely open (it previously 401'd
+// unconditionally via an independent, now-removed Authorization: Bearer
+// check against MCPAuthToken), and a set WebWSToken requires the ?token=
+// query param exactly like its siblings.
+
+func TestApiIngestRoute_EmptyWebWSToken_EmptyMCPAuthToken_Open(t *testing.T) {
+	cfg := newIngestCfg(t)
+	// Both secrets unset: the historical bug rejected every request here
+	// even though the web surface is meant to be open in this configuration.
+	require.Empty(t, cfg.WebWSToken)
+	require.Empty(t, cfg.MCPAuthToken)
+
+	ing := &fakeIngester{result: "ok"}
+	route := staticAuth(cfg.WebWSToken, apiIngest(ing, cfg))
+	body, ct := buildMultipart(t, "note.txt", "hello", "")
+	req := httptest.NewRequest(http.MethodPost, "/api/ingest", body)
+	req.Header.Set("Content-Type", ct)
+	rr := httptest.NewRecorder()
+	route.ServeHTTP(rr, req)
+
+	assert.Equal(t, http.StatusOK, rr.Code)
+	assert.Equal(t, 1, ing.calls)
+}
+
+func TestApiIngestRoute_SetWebWSToken_MissingQueryToken_Rejected(t *testing.T) {
+	cfg := newIngestCfg(t)
+	cfg.WebWSToken = validToken
+
+	route := staticAuth(cfg.WebWSToken, apiIngest(&fakeIngester{}, cfg))
+	body, ct := buildMultipart(t, "note.txt", "hello", "")
+	req := httptest.NewRequest(http.MethodPost, "/api/ingest", body)
+	req.Header.Set("Content-Type", ct)
+	rr := httptest.NewRecorder()
+	route.ServeHTTP(rr, req)
+
+	assert.Equal(t, http.StatusUnauthorized, rr.Code)
+}
+
+func TestApiIngestRoute_SetWebWSToken_WrongQueryToken_Rejected(t *testing.T) {
+	cfg := newIngestCfg(t)
+	cfg.WebWSToken = validToken
+
+	route := staticAuth(cfg.WebWSToken, apiIngest(&fakeIngester{}, cfg))
+	body, ct := buildMultipart(t, "note.txt", "hello", "")
+	req := httptest.NewRequest(http.MethodPost, "/api/ingest?token=wrong-token", body)
+	req.Header.Set("Content-Type", ct)
+	rr := httptest.NewRecorder()
+	route.ServeHTTP(rr, req)
+
+	assert.Equal(t, http.StatusUnauthorized, rr.Code)
+}
+
+func TestApiIngestRoute_SetWebWSToken_CorrectQueryToken_Accepted(t *testing.T) {
+	cfg := newIngestCfg(t)
+	cfg.WebWSToken = validToken
+
+	ing := &fakeIngester{result: "ok"}
+	route := staticAuth(cfg.WebWSToken, apiIngest(ing, cfg))
+	body, ct := buildMultipart(t, "note.txt", "hello", "")
+	req := httptest.NewRequest(http.MethodPost, "/api/ingest?token="+validToken, body)
+	req.Header.Set("Content-Type", ct)
+	rr := httptest.NewRecorder()
+	route.ServeHTTP(rr, req)
+
+	assert.Equal(t, http.StatusOK, rr.Code)
+	assert.Equal(t, 1, ing.calls)
 }
 
 func TestApiIngest_NeutralizesPathTraversalInFilename(t *testing.T) {
@@ -125,7 +170,6 @@ func TestApiIngest_NeutralizesPathTraversalInFilename(t *testing.T) {
 	body, ct := buildMultipart(t, "../../etc/passwd", "evil", "")
 	req := httptest.NewRequest(http.MethodPost, "/api/ingest", body)
 	req.Header.Set("Content-Type", ct)
-	req.Header.Set("Authorization", "Bearer "+cfg.MCPAuthToken)
 	rr := httptest.NewRecorder()
 	h(rr, req)
 
@@ -147,7 +191,6 @@ func TestApiIngest_RejectsOversize(t *testing.T) {
 	body, ct := buildMultipart(t, "note.txt", strings.Repeat("x", 4096), "")
 	req := httptest.NewRequest(http.MethodPost, "/api/ingest", body)
 	req.Header.Set("Content-Type", ct)
-	req.Header.Set("Authorization", "Bearer "+cfg.MCPAuthToken)
 	rr := httptest.NewRecorder()
 	h(rr, req)
 	assert.Equal(t, http.StatusRequestEntityTooLarge, rr.Code)
@@ -160,7 +203,6 @@ func TestApiIngest_HappyPath(t *testing.T) {
 	body, ct := buildMultipart(t, "note.txt", "hello world", "laptop")
 	req := httptest.NewRequest(http.MethodPost, "/api/ingest", body)
 	req.Header.Set("Content-Type", ct)
-	req.Header.Set("Authorization", "Bearer "+cfg.MCPAuthToken)
 	rr := httptest.NewRecorder()
 	h(rr, req)
 
@@ -191,7 +233,6 @@ func TestApiIngest_DefaultsSourceWhenOmitted(t *testing.T) {
 	body, ct := buildMultipart(t, "note.txt", "hello", "")
 	req := httptest.NewRequest(http.MethodPost, "/api/ingest", body)
 	req.Header.Set("Content-Type", ct)
-	req.Header.Set("Authorization", "Bearer "+cfg.MCPAuthToken)
 	rr := httptest.NewRecorder()
 	h(rr, req)
 
