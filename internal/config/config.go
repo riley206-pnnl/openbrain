@@ -58,6 +58,12 @@ type Config struct {
 	MCPServerVersion string `env:"OPENBRAIN_MCP_SERVER_VERSION"`
 	MCPHTTPEnabled   bool   `env:"OPENBRAIN_MCP_HTTP_ENABLED" envDefault:"false"`
 	MCPAuthToken     string `env:"OPENBRAIN_MCP_AUTH_TOKEN"`
+	// MCPAllowedHosts is a comma-separated Host-header allowlist for the /mcp
+	// and /sse transports (see internal/mcphttp.AllowedHosts). Loopback hosts
+	// (localhost, 127.0.0.1, ::1) are always permitted in addition to this
+	// list, so the default only needs to name the public host cloudflared
+	// forwards for the deployed instance. Override for a different deployment.
+	MCPAllowedHosts string `env:"OPENBRAIN_MCP_ALLOWED_HOSTS" envDefault:"openbrain.wr-s.net"`
 
 	// OAuth (for Claude.ai MCP connector)
 	OAuthClientID     string `env:"OPENBRAIN_OAUTH_CLIENT_ID"`
@@ -140,6 +146,24 @@ func (c *Config) DBUrl() string {
 // WebAddr returns the host:port for the web server.
 func (c *Config) WebAddr() string {
 	return fmt.Sprintf("%s:%d", c.WebHost, c.WebPort)
+}
+
+// MCPAllowedHostsList splits MCPAllowedHosts into a trimmed slice, dropping
+// empty entries. Loopback hosts are not included here: mcphttp.AllowedHosts
+// always permits them regardless of this list's contents.
+func (c *Config) MCPAllowedHostsList() []string {
+	if c.MCPAllowedHosts == "" {
+		return nil
+	}
+	parts := strings.Split(c.MCPAllowedHosts, ",")
+	result := make([]string, 0, len(parts))
+	for _, p := range parts {
+		trimmed := strings.TrimSpace(p)
+		if trimmed != "" {
+			result = append(result, trimmed)
+		}
+	}
+	return result
 }
 
 // validateMarkitdownPath checks that the configured binary path is safe:

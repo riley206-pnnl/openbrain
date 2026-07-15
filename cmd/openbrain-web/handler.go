@@ -103,8 +103,9 @@ func serveHTTP(ctx context.Context, cfg *config.Config, b *brain.Brain, embedder
 	// Mount MCP HTTP transports when enabled
 	if cfg.MCPHTTPEnabled && cfg.MCPAuthToken != "" {
 		slog.Info("mounting MCP HTTP transport", "endpoints", []string{"/mcp", "/sse/"})
-		mux.Handle("/mcp", mcphttp.NewMCPHandler(cfg.MCPAuthToken, cfg.MCPServerName, cfg.MCPServerVersion, b, embedder))
-		mux.Handle("/sse/", mcphttp.NewSSEHandler(cfg.MCPAuthToken, cfg.MCPServerName, cfg.MCPServerVersion, b, embedder))
+		allowedHosts := cfg.MCPAllowedHostsList()
+		mux.Handle("/mcp", mcphttp.NewMCPHandler(cfg.MCPAuthToken, cfg.MCPServerName, cfg.MCPServerVersion, b, embedder, allowedHosts))
+		mux.Handle("/sse/", mcphttp.NewSSEHandler(cfg.MCPAuthToken, cfg.MCPServerName, cfg.MCPServerVersion, b, embedder, allowedHosts))
 
 		// Mount OAuth 2.0 endpoints for MCP spec compliance.
 		// The MCP spec (2025-03-26) requires authorization code flow with PKCE.

@@ -70,13 +70,13 @@ func TestBearerAuthMiddleware_RejectsMalformedHeader(t *testing.T) {
 
 func TestNewMCPHandler_PanicsOnNilBrain(t *testing.T) {
 	assert.Panics(t, func() {
-		mcphttp.NewMCPHandler("test-token", "openbrain", "0.1.0", nil, nil)
+		mcphttp.NewMCPHandler("test-token", "openbrain", "0.1.0", nil, nil, nil)
 	}, "NewMCPHandler should panic when brain is nil")
 }
 
 func TestNewSSEHandler_PanicsOnNilBrain(t *testing.T) {
 	assert.Panics(t, func() {
-		mcphttp.NewSSEHandler("test-token", "openbrain", "0.1.0", nil, nil)
+		mcphttp.NewSSEHandler("test-token", "openbrain", "0.1.0", nil, nil, nil)
 	}, "NewSSEHandler should panic when brain is nil")
 }
 
