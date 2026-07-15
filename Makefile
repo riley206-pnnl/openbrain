@@ -134,17 +134,36 @@ open-web:
 	true
 
 ## Rotate OPENBRAIN_WEB_WS_TOKEN in .env and restart openbrain-web (invalidates old URLs)
+#
+# Every step below either aborts the recipe outright (`set -e`) or is
+# explicitly guarded with `|| { echo ERROR; exit 1; }`, so the "Rotated ...;
+# restarted" success message and the "old URLs invalid" warning print ONLY
+# when the token was actually written AND openbrain-web actually restarted.
+# A failure anywhere (bad token, unwritable .env, restart failure) surfaces
+# an accurate ERROR: message and a non-zero exit; it never falls through to
+# the success text.
 rotate-web-token:
 	@test -f "$(ENV_FILE)" || { echo "ERROR: $(ENV_FILE) not found" >&2; exit 1; }
 	@command -v openssl >/dev/null 2>&1 || { echo "ERROR: openssl not found" >&2; exit 1; }
-	@new_token=$$(openssl rand -base64 36 | tr -d '\n'); \
-	if grep -q "^$(WEB_TOKEN_VAR)=" "$(ENV_FILE)"; then \
-		sed -i "s|^$(WEB_TOKEN_VAR)=.*|$(WEB_TOKEN_VAR)=$$new_token|" "$(ENV_FILE)"; \
-	else \
-		printf '%s=%s\n' "$(WEB_TOKEN_VAR)" "$$new_token" >> "$(ENV_FILE)"; \
+	@command -v python3 >/dev/null 2>&1 || { echo "ERROR: python3 not found" >&2; exit 1; }
+	@set -e; \
+	new_token=$$(openssl rand -base64 36 | tr -d '\n'); \
+	if [ -z "$$new_token" ] || [ $${#new_token} -lt 32 ]; then \
+		echo "ERROR: generated token was empty or shorter than 32 chars; aborting without touching $(ENV_FILE) or restarting" >&2; \
+		exit 1; \
 	fi; \
-	chmod 600 "$(ENV_FILE)"; \
-	systemctl --user restart openbrain-web; \
+	if grep -q "^$(WEB_TOKEN_VAR)=" "$(ENV_FILE)"; then \
+		sed -i "s|^$(WEB_TOKEN_VAR)=.*|$(WEB_TOKEN_VAR)=$$new_token|" "$(ENV_FILE)" \
+			|| { echo "ERROR: failed to update $(WEB_TOKEN_VAR) in $(ENV_FILE)" >&2; exit 1; }; \
+	else \
+		printf '%s=%s\n' "$(WEB_TOKEN_VAR)" "$$new_token" >> "$(ENV_FILE)" \
+			|| { echo "ERROR: failed to append $(WEB_TOKEN_VAR) to $(ENV_FILE)" >&2; exit 1; }; \
+	fi; \
+	chmod 600 "$(ENV_FILE)" || { echo "ERROR: failed to chmod 600 $(ENV_FILE)" >&2; exit 1; }; \
+	if ! systemctl --user restart openbrain-web; then \
+		echo "ERROR: systemctl --user restart openbrain-web FAILED. $(ENV_FILE) now has the NEW token but the running service may still be serving the OLD token: restart it manually and verify before treating old URLs as invalid." >&2; \
+		exit 1; \
+	fi; \
 	encoded=$$(python3 -c "import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=''))" "$$new_token"); \
 	url="https://$(HOST)/graph?token=$$encoded"; \
 	echo "Rotated $(WEB_TOKEN_VAR); openbrain-web restarted."; \
