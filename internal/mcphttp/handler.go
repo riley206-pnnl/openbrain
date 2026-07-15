@@ -66,10 +66,20 @@ const mcpBurstSize = 10
 
 // NewMCPHandler returns an http.Handler for the Streamable HTTP MCP transport,
 // wrapped with rate limiting and bearer token authentication. Mount at "/mcp".
-func NewMCPHandler(token, name, version string, b *brain.Brain, embedder embeddings.Embedder) http.Handler {
+//
+// allowedHosts configures the Host-header allowlist (see AllowedHosts) that
+// replaces mcp-go's built-in loopback-only DNS-rebinding protection: the
+// built-in check 403s every remote request once the server binds a loopback
+// address (OB-054), because it has no notion of a legitimate public Host.
+// mcp-go's own protection is disabled here in favor of that allowlist, not
+// removed outright: DNS-rebinding protection stays enforced, just against an
+// explicit list of names instead of a loopback-only heuristic.
+func NewMCPHandler(token, name, version string, b *brain.Brain, embedder embeddings.Embedder, allowedHosts []string) http.Handler {
 	mcpSrv := newMCPServer(name, version, b, embedder)
-	transport := server.NewStreamableHTTPServer(mcpSrv)
-	return SecureHeaders(RateLimit(mcpRequestsPerSecond, mcpBurstSize, BearerAuth(token, transport)))
+	transport := server.NewStreamableHTTPServer(mcpSrv,
+		server.WithDisableLocalhostProtection(true),
+	)
+	return AllowedHosts(allowedHosts, SecureHeaders(RateLimit(mcpRequestsPerSecond, mcpBurstSize, BearerAuth(token, transport))))
 }
 
 // NewSSEHandler returns an http.Handler for the SSE MCP transport,
@@ -78,10 +88,14 @@ func NewMCPHandler(token, name, version string, b *brain.Brain, embedder embeddi
 // The SSE server registers two internal endpoints:
 //   - /sse/sse — the SSE stream endpoint
 //   - /sse/message — the message POST endpoint
-func NewSSEHandler(token, name, version string, b *brain.Brain, embedder embeddings.Embedder) http.Handler {
+//
+// allowedHosts configures the Host-header allowlist; see NewMCPHandler for
+// why mcp-go's built-in protection is disabled in favor of it.
+func NewSSEHandler(token, name, version string, b *brain.Brain, embedder embeddings.Embedder, allowedHosts []string) http.Handler {
 	mcpSrv := newMCPServer(name, version, b, embedder)
 	sseTransport := server.NewSSEServer(mcpSrv,
 		server.WithStaticBasePath("/sse"),
+		server.WithSSEDisableLocalhostProtection(true),
 	)
-	return SecureHeaders(RateLimit(mcpRequestsPerSecond, mcpBurstSize, BearerAuth(token, sseTransport)))
+	return AllowedHosts(allowedHosts, SecureHeaders(RateLimit(mcpRequestsPerSecond, mcpBurstSize, BearerAuth(token, sseTransport))))
 }
