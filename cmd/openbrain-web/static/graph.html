@@ -1122,7 +1122,10 @@ async function openDetail(nodeId) {
   detailBody.innerHTML = '<p id="detail-loading">Loading…</p>';
 
   try {
-    const res = await fetch(`/api/thought/${encodeURIComponent(nodeId)}`);
+    const token = new URLSearchParams(location.search).get('token') || '';
+    const detailURL = `/api/thought/${encodeURIComponent(nodeId)}` +
+      (token ? '?token=' + encodeURIComponent(token) : '');
+    const res = await fetch(detailURL);
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const t = await res.json();
 
@@ -1225,6 +1228,8 @@ async function runSearch() {
       searchURL += '&from=' + encodeURIComponent(fmtDate(dateMin));
       searchURL += '&to='   + encodeURIComponent(fmtDate(dateMax));
     }
+    const token = new URLSearchParams(location.search).get('token') || '';
+    if (token) searchURL += '&token=' + encodeURIComponent(token);
     const res = await fetch(searchURL);
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const rows = await res.json();
