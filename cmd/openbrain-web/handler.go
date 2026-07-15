@@ -67,20 +67,84 @@ func parseAllowedOrigins(raw string) []string {
 	return result
 }
 
-func serveHTTP(ctx context.Context, cfg *config.Config, b *brain.Brain, embedder embeddings.Embedder) error {
+// openBrainAuthMode reports the auth posture of a token-gated surface as
+// "open" or "required", for both the startup warning and the /health
+// response. It never returns or logs the token value itself.
+func openBrainAuthMode(token string) string {
+	if token == "" {
+		return "open"
+	}
+	return "required"
+}
+
+// healthHandler serves /health. Alongside the plain liveness check, the
+// response reports the auth posture of every token-gated surface (web, mcp)
+// so an operator can discover an open-mode deployment at runtime (e.g. under
+// systemd, where the startup slog.Warn line is easy to miss) instead of only
+// at boot. No token value is ever included, only the mode.
+func healthHandler(cfg *config.Config) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"status": "ok",
+			"auth_mode": map[string]string{
+				"web": openBrainAuthMode(cfg.WebWSToken),
+				"mcp": openBrainAuthMode(cfg.MCPAuthToken),
+			},
+		})
+	}
+}
+
+// webOpenRoutes lists every route staticAuth gates, in the order they are
+// registered. Shared between the startup warning and its test so the two
+// cannot silently drift apart.
+var webOpenRoutes = []string{"/", "/graph", "/brain.json", "/api/rebuild-viz", "/api/search", "/api/search/nodes", "/api/thought/", "/api/capture", "/api/stats", "/api/review", "/api/ingest", "/ws"}
+
+// webOpenWriteEndpoints lists the subset of webOpenRoutes that perform a
+// write (disk write, brain mutation, or rebuild trigger).
+var webOpenWriteEndpoints = []string{"/api/ingest", "/api/capture", "/api/rebuild-viz"}
+
+// warnWebOpenMode logs the loud, structured startup warning for the case
+// where cfg.WebWSToken is empty and the whole web surface runs open. Empty is
+// a deliberate, operator-selected posture (see Craig's uniform empty=open
+// directive), not a misconfiguration, so this names the exposed surface, the
+// bind address, and the open write endpoints rather than merely noting the
+// condition. Extracted to a standalone function so tests can assert it fires.
+func warnWebOpenMode(cfg *config.Config) {
+	slog.Warn("web auth token unset; web surface running OPEN with no authentication",
+		"bind", cfg.WebAddr(),
+		"open_routes", webOpenRoutes,
+		"open_write_endpoints", webOpenWriteEndpoints,
+		"remediation", "set OPENBRAIN_WEB_WS_TOKEN to require the ?token= query param on every web route")
+}
+
+// warnMCPOpenMode logs the loud, structured startup warning for the case
+// where cfg.MCPAuthToken is empty and the MCP HTTP transport runs open.
+// Extracted to a standalone function so tests can assert it fires.
+func warnMCPOpenMode(cfg *config.Config) {
+	slog.Warn("MCP HTTP transport running OPEN; OPENBRAIN_MCP_AUTH_TOKEN unset, /mcp and /sse/ accept unauthenticated requests",
+		"bind", cfg.WebAddr(),
+		"remediation", "set OPENBRAIN_MCP_AUTH_TOKEN to require a bearer token on the MCP transport")
+}
+
+// buildMux wires every route onto a fresh http.ServeMux and returns it,
+// without binding a listener. Extracted out of serveHTTP as a seam: unit
+// tests exercise the real, fully-wired mux via httptest instead of calling
+// the bare handler functions in isolation, which is the only way to prove
+// the staticAuth/BearerAuth wrapping present at registration time actually
+// applies to the routes callers hit in production.
+func buildMux(cfg *config.Config, b *brain.Brain, embedder embeddings.Embedder) (*http.ServeMux, error) {
 	mux := http.NewServeMux()
 
 	staticSub, err := fs.Sub(staticFS, "static")
 	if err != nil {
-		return fmt.Errorf("static fs: %w", err)
+		return nil, fmt.Errorf("static fs: %w", err)
 	}
 	mux.Handle("/", staticAuth(cfg.WebWSToken, http.FileServer(http.FS(staticSub))))
 	mux.Handle("/graph", staticAuth(cfg.WebWSToken, graphHandler(staticSub)))
 	mux.Handle("/brain.json", staticAuth(cfg.WebWSToken, brainJSONHandler(staticSub, cfg.VizOutputPath)))
-	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		fmt.Fprint(w, "ok")
-	})
+	mux.HandleFunc("/health", healthHandler(cfg))
 
 	mux.Handle("/api/rebuild-viz", staticAuth(cfg.WebWSToken, apiRebuildViz(cfg)))
 	mux.Handle("/api/search", staticAuth(cfg.WebWSToken, apiSearch(b)))
@@ -95,16 +159,9 @@ func serveHTTP(ctx context.Context, cfg *config.Config, b *brain.Brain, embedder
 	mux.HandleFunc("/ws", wsHandler(b, upgrader, cfg.WebWSToken))
 	// Conditional auth posture: when cfg.WebWSToken is set, staticAuth and
 	// wsHandler require it via the ?token= query param on every route above;
-	// when it is empty, the whole web surface runs open. Empty is a deliberate,
-	// operator-selected posture, so warn loudly and name the exposed surface,
-	// the bind address, and the open write endpoints (disk write, capture,
-	// rebuild-viz). The loopback default bind is the backstop.
+	// when it is empty, the whole web surface runs open.
 	if cfg.WebWSToken == "" {
-		slog.Warn("web auth token unset; web surface running OPEN with no authentication",
-			"bind", cfg.WebAddr(),
-			"open_routes", []string{"/", "/graph", "/brain.json", "/api/rebuild-viz", "/api/search", "/api/search/nodes", "/api/thought/", "/api/capture", "/api/stats", "/api/review", "/api/ingest", "/ws"},
-			"open_write_endpoints", []string{"/api/ingest", "/api/capture", "/api/rebuild-viz"},
-			"remediation", "set OPENBRAIN_WEB_WS_TOKEN to require the ?token= query param on every web route")
+		warnWebOpenMode(cfg)
 	}
 
 	// Mount MCP HTTP transports when enabled. Conditional auth posture: the
@@ -119,9 +176,7 @@ func serveHTTP(ctx context.Context, cfg *config.Config, b *brain.Brain, embedder
 		mux.Handle("/sse/", mcphttp.NewSSEHandler(cfg.MCPAuthToken, cfg.MCPServerName, cfg.MCPServerVersion, b, embedder, allowedHosts))
 
 		if cfg.MCPAuthToken == "" {
-			slog.Warn("MCP HTTP transport running OPEN; OPENBRAIN_MCP_AUTH_TOKEN unset, /mcp and /sse/ accept unauthenticated requests",
-				"bind", cfg.WebAddr(),
-				"remediation", "set OPENBRAIN_MCP_AUTH_TOKEN to require a bearer token on the MCP transport")
+			warnMCPOpenMode(cfg)
 		} else {
 			// Mount OAuth 2.0 endpoints for MCP spec compliance.
 			// The MCP spec (2025-03-26) requires authorization code flow with PKCE.
@@ -129,6 +184,15 @@ func serveHTTP(ctx context.Context, cfg *config.Config, b *brain.Brain, embedder
 			// /register) regardless of what the metadata advertises.
 			mountOAuthEndpoints(mux, cfg)
 		}
+	}
+
+	return mux, nil
+}
+
+func serveHTTP(ctx context.Context, cfg *config.Config, b *brain.Brain, embedder embeddings.Embedder) error {
+	mux, err := buildMux(cfg, b, embedder)
+	if err != nil {
+		return err
 	}
 
 	srv := &http.Server{Addr: cfg.WebAddr(), Handler: mux}
