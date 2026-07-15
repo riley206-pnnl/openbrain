@@ -290,13 +290,13 @@ func apiGetThought(b *brain.Brain) http.HandlerFunc {
 		}
 
 		type thoughtDetail struct {
-			ID          string   `json:"id"`
-			Type        string   `json:"type"`
-			Tags        []string `json:"tags"`
-			Source      string   `json:"source"`
-			Summary     string   `json:"summary"`
-			Content     string   `json:"content"`
-			CreatedAt   string   `json:"created_at"`
+			ID        string   `json:"id"`
+			Type      string   `json:"type"`
+			Tags      []string `json:"tags"`
+			Source    string   `json:"source"`
+			Summary   string   `json:"summary"`
+			Content   string   `json:"content"`
+			CreatedAt string   `json:"created_at"`
 		}
 
 		summary := ""
@@ -494,6 +494,14 @@ func brainJSONHandler(staticSub fs.FS, vizOutputPath string) http.Handler {
 	})
 }
 
+// vizDegradedMarker is the machine-readable line build-brain-viz.py prints to
+// stdout when every cluster fell back to heuristic labels (Ollama was
+// unreachable). The script still exits 0 in that case: the map is valid,
+// just labeled without LLM assistance, so apiRebuildViz scans the captured
+// output for this marker rather than relying on the exit code to know
+// whether the build is degraded.
+const vizDegradedMarker = "BRAIN_VIZ_DEGRADED=true"
+
 // apiRebuildViz runs the build-brain-viz.py script to regenerate brain.json.
 // Route: POST /api/rebuild-viz
 // Auth: handled by staticAuth at registration time.
@@ -521,7 +529,17 @@ func apiRebuildViz(cfg *config.Config) http.HandlerFunc {
 			return
 		}
 
-		slog.Info("rebuild-viz succeeded", "output_path", cfg.VizOutputPath)
-		jsonResponse(w, map[string]string{"status": "ok"})
+		// A successful exit does not mean a fully-labeled map: the script
+		// exits 0 even when every cluster fell back to heuristic labels
+		// (Ollama unreachable). Surface that degradation instead of silently
+		// discarding it, without failing a rebuild that otherwise succeeded.
+		degraded := strings.Contains(string(out), vizDegradedMarker)
+		if degraded {
+			slog.Warn("rebuild-viz succeeded with degraded cluster labels (heuristic only, LLM unreachable)",
+				"output_path", cfg.VizOutputPath, "output", string(out))
+		} else {
+			slog.Info("rebuild-viz succeeded", "output_path", cfg.VizOutputPath)
+		}
+		jsonResponse(w, map[string]any{"status": "ok", "degraded": degraded})
 	}
 }

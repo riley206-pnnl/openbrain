@@ -514,10 +514,14 @@ def run_pipeline(args: argparse.Namespace) -> None:
         thoughts, coords_2d, labels, cfg, ollama_model, args.no_llm,
     )
 
-    # Warn loudly if the LLM service was completely unreachable.
+    # Warn loudly if the LLM service was completely unreachable, and print a
+    # machine-readable marker line so callers (the Go rebuild handler) can
+    # detect the degraded build from captured stdout/stderr without having to
+    # parse the human-readable warning text.
     if llm_attempts > 0 and llm_fallbacks == llm_attempts:
-        print(f"\n  ⚠  All {llm_attempts} clusters fell back to heuristic labels "
-              f"— is Ollama reachable at {cfg.get('OPENBRAIN_OLLAMA_BASE_URL', 'http://localhost:11434')}?")
+        print(f"\n  [warn] All {llm_attempts} clusters fell back to heuristic labels, "
+              f"is Ollama reachable at {cfg.get('OPENBRAIN_OLLAMA_BASE_URL', 'http://localhost:11434')}?")
+        print("BRAIN_VIZ_DEGRADED=true")
     elif llm_fallbacks > 0:
         print(f"\n  [info] {llm_fallbacks}/{llm_attempts} clusters used heuristic labels")
 
