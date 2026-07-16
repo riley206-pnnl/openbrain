@@ -52,11 +52,16 @@ from dotenv import dotenv_values
 
 
 def _import_umap():
+    """Return the UMAP class, or None if umap-learn is not installed.
+
+    Callers print their own fallback message: project_2d() falls back to
+    t-SNE, but cluster_space() falls back to raw L2-normalized embeddings,
+    so no single message here is accurate for both call sites.
+    """
     try:
         from umap import UMAP
         return UMAP
     except ImportError:
-        print("  [warn] umap-learn not installed; falling back to t-SNE")
         return None
 
 
@@ -129,6 +134,7 @@ def project_2d(embeddings: np.ndarray, use_umap: bool = True) -> np.ndarray:
                            n_neighbors=n_neighbors, min_dist=0.1,
                            random_state=42, verbose=False)
             return reducer.fit_transform(embeddings)
+        print("  [warn] umap-learn not installed; falling back to t-SNE")
 
     from sklearn.manifold import TSNE
     # perplexity must be < N; clamp so small brains don't crash.
@@ -264,24 +270,35 @@ def heuristic_label(cluster_thoughts: list[dict]) -> str:
     return dominant.replace("_", " ").title()
 
 
+# Strips a leading bullet run (-, *, •) or a numbered-list marker
+# (N. / N)) followed by required whitespace. Bare leading digits with no
+# "." or ")" delimiter (a real label like "3-Phase Feeder Data" or "2026
+# Roadmap") are deliberately NOT matched, so they survive untouched.
+_LIST_MARKER_RE = re.compile(r"^\s*(?:[\-\*•]+|\d+[.\)])\s+")
+
+
 def _parse_llm_label(raw: str) -> str:
     """Extract a usable label from a (possibly chatty) LLM response.
 
     Ollama models vary in how strictly they follow "return only the label":
-    some return a bulleted or numbered list of candidates instead of a
-    single line. Take the first non-empty line, strip common list markers
-    (bullets, numbering, quotes, backticks), and return it trimmed. Returns
-    an empty string when no usable line is found, so the caller's length
-    check rejects it the same as an empty response would.
+    some return a bulleted or numbered list of candidates, a preamble
+    sentence before the list, or bold-wrapped markdown. For each non-empty
+    line: strip a leading list marker, then strip surrounding whitespace,
+    quotes, backticks, and asterisks. A line that still ends with a colon
+    after stripping is treated as a preamble ("Here are some labels:") and
+    skipped in favor of the next non-empty line. Returns an empty string
+    when no usable line is found, so the caller's length check rejects it
+    the same as an empty response would.
     """
     for line in raw.splitlines():
         line = line.strip()
         if not line:
             continue
-        line = re.sub(r"^[\-\*•\d]+[.\)]?\s*", "", line)
-        line = line.strip().strip("\"'`").strip()
-        if line:
-            return line
+        line = _LIST_MARKER_RE.sub("", line)
+        line = line.strip(" \t\"'`*")
+        if not line or line.endswith(":"):
+            continue
+        return line
     return ""
 
 

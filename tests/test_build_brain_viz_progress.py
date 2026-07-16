@@ -1,11 +1,18 @@
-"""Tests for the --progress-file sidecar in scripts/build-brain-viz.py.
+"""Tests for scripts/build-brain-viz.py.
 
-Covers the new progress-emission surface only (OB plan-2 phase-2): the
-atomic-write helper's schema and atomicity, the labeling-loop pct mapping
-(50-95 band), and that omitting --progress-file is a true no-op. The rest of
-the pipeline (Postgres load, UMAP, HDBSCAN, Ollama) is out of scope for this
-suite; per [[tdd]] "Scope", scripts earn a smoke test plus documented failure
-paths, not full per-function TDD cycling.
+Covers two surfaces:
+
+1. The --progress-file sidecar (OB plan-2 phase-2): the atomic-write
+   helper's schema and atomicity, the labeling-loop pct mapping (50-95
+   band), and that omitting --progress-file is a true no-op.
+2. The LLM cluster-label parsing and model-resolution surface (the
+   viz-clustering fix): _parse_llm_label's list-marker stripping (with the
+   digit-leading-label preservation regression coverage) and
+   resolve_ollama_model's env-var precedence.
+
+The rest of the pipeline (Postgres load, UMAP, HDBSCAN) is out of scope for
+this suite; per [[tdd]] "Scope", scripts earn a smoke test plus documented
+failure paths, not full per-function TDD cycling.
 """
 
 from __future__ import annotations
@@ -287,3 +294,138 @@ class TestProgressFileFlagIsOptIn:
         )
         args = viz.parse_args(tmp_path / "brain.json")
         assert args.progress_file == str(status_path)
+
+
+class TestParseLlmLabel:
+    """_parse_llm_label: extract a usable label from a chatty LLM response.
+
+    The digit-leading cases are a regression suite for the CRITICAL bug
+    where a numbered-list regex treated bare leading digits as a list
+    marker and silently mangled real labels (see git history on this
+    branch). Bare digits are preserved unless followed by a "." or ")"
+    list-marker delimiter.
+    """
+
+    @pytest.mark.parametrize(
+        ("raw", "expected"),
+        [
+            # Single clean line: no marker to strip.
+            ("Work Decisions", "Work Decisions"),
+            # Numbered list: only the first item's marker is stripped.
+            ("1. A\n2. B", "A"),
+            # Bullet markers: -, *, bullet char.
+            ("- Card Schema Design", "Card Schema Design"),
+            ("* Card Schema Design", "Card Schema Design"),
+            ("• Card Schema Design", "Card Schema Design"),
+            # Digit-leading LEGITIMATE labels must survive untouched: no
+            # "." or ")" delimiter after the digits, so this is not a
+            # list marker.
+            ("3-Phase Feeder Data", "3-Phase Feeder Data"),
+            ("2026 Roadmap", "2026 Roadmap"),
+            ("5G Network Planning", "5G Network Planning"),
+            ("401k Notes", "401k Notes"),
+            # Real numbered-list marker: digits + "." or ")" + whitespace.
+            ("1. Grid Topology", "Grid Topology"),
+            ("2) Grid Topology", "Grid Topology"),
+            # Quote / backtick / markdown-bold wrapping is stripped.
+            ('"Work Decisions"', "Work Decisions"),
+            ("'Work Decisions'", "Work Decisions"),
+            ("`Work Decisions`", "Work Decisions"),
+            ("**Work Decisions**", "Work Decisions"),
+            # Preamble sentence (ends with ":") is skipped in favor of the
+            # next non-empty line.
+            ("Here are some possible labels:\n\n- Card Schema Design", "Card Schema Design"),
+        ],
+    )
+    def test_extracts_expected_label(self, raw: str, expected: str) -> None:
+        assert viz._parse_llm_label(raw) == expected
+
+    @pytest.mark.parametrize("raw", ["", "   ", "\n\n  \t\n"])
+    def test_empty_or_whitespace_only_returns_empty_string(self, raw: str) -> None:
+        # No usable line: the caller's length gate (2 <= len <= 60) rejects
+        # an empty string the same way it would reject a missing response.
+        assert viz._parse_llm_label(raw) == ""
+
+    def test_multiline_input_never_leaks_a_newline_into_the_result(self) -> None:
+        # Pin the invariant the old "\n" not in label guard used to
+        # enforce directly: the parsed result is always a single line.
+        raw = "1. Grid Topology\n2. Inverter Control\n3. CSIP Conformance"
+        result = viz._parse_llm_label(raw)
+        assert "\n" not in result
+        assert result == "Grid Topology"
+
+
+class TestLlmLabelValidationGate:
+    """llm_label(): the 2-60 char length gate composed on top of parsing.
+
+    Exercises the None-path end to end via a stubbed requests.post, since
+    _parse_llm_label itself only ever returns a string (never None); the
+    None contract lives one layer up, in llm_label's post-parse length
+    check.
+    """
+
+    class _FakeResponse:
+        def __init__(self, payload: dict[str, str]) -> None:
+            self._payload = payload
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, str]:
+            return self._payload
+
+    def test_empty_response_returns_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(
+            viz.requests, "post", lambda *a, **kw: self._FakeResponse({"response": ""})
+        )
+        result = viz.llm_label([{"summary": "x", "content": "x", "tags": []}], {}, "model")
+        assert result is None
+
+    def test_over_60_char_label_returns_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        long_label = "A" * 61
+        monkeypatch.setattr(
+            viz.requests,
+            "post",
+            lambda *a, **kw: self._FakeResponse({"response": long_label}),
+        )
+        result = viz.llm_label([{"summary": "x", "content": "x", "tags": []}], {}, "model")
+        assert result is None
+
+    def test_valid_label_is_returned(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(
+            viz.requests,
+            "post",
+            lambda *a, **kw: self._FakeResponse({"response": "IEEE Technical Tests"}),
+        )
+        result = viz.llm_label([{"summary": "x", "content": "x", "tags": []}], {}, "model")
+        assert result == "IEEE Technical Tests"
+
+
+class TestResolveOllamaModelPrecedence:
+    """resolve_ollama_model: OPENBRAIN_EXTRACT_MODEL wins, then FAST, then CHAT."""
+
+    def test_all_three_set_prefers_extract_model(self) -> None:
+        cfg = {
+            "OPENBRAIN_EXTRACT_MODEL": "gemma3",
+            "OPENBRAIN_EXTRACT_MODEL_FAST": "llama3.2:1b",
+            "OPENBRAIN_CHAT_MODEL": "mistral:7b",
+        }
+        assert viz.resolve_ollama_model(cfg) == "gemma3"
+
+    def test_only_fast_and_chat_set_prefers_fast(self) -> None:
+        cfg = {
+            "OPENBRAIN_EXTRACT_MODEL_FAST": "llama3.2:1b",
+            "OPENBRAIN_CHAT_MODEL": "mistral:7b",
+        }
+        assert viz.resolve_ollama_model(cfg) == "llama3.2:1b"
+
+    def test_only_chat_set_falls_back_to_chat(self) -> None:
+        cfg = {"OPENBRAIN_CHAT_MODEL": "mistral:7b"}
+        assert viz.resolve_ollama_model(cfg) == "mistral:7b"
+
+    def test_none_set_exits_nonzero(self) -> None:
+        with pytest.raises(SystemExit) as exc_info:
+            viz.resolve_ollama_model({})
+        # sys.exit(str) sets a truthy, non-integer code; assert it is not
+        # the "clean exit" 0/None the caller would otherwise get.
+        assert exc_info.value.code not in (0, None)
