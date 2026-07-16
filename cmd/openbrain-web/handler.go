@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -710,13 +711,42 @@ func resetVizProgress(vizOutputPath string) {
 // Ollama down) without that risk.
 const vizOutputTailMaxLen = 800
 
+// libpqCredentialRe matches libpq keyword/value connection-string credential
+// tokens (password=... or pwd=...), case-insensitive. build-brain-viz.py
+// builds its Postgres conninfo in libpq keyword/value form (e.g. "host=...
+// user=... password=<value> sslmode=disable"), never as a URL, so the
+// scheme://user:pass@host redaction below does not see it.
+//
+// libpq values are whitespace-delimited unless single-quoted. This pattern
+// matches either a single-quoted value (which may itself contain spaces) or
+// a bare non-whitespace token. A password containing an UNQUOTED space (the
+// shape that actually leaks: build-brain-viz.py does not quote the password
+// when it builds the conninfo string, so a spaced passphrase both breaks the
+// conninfo parse AND leaks) only has its first whitespace-delimited token
+// redacted; anything after the first space is not distinguishable from
+// surrounding connection-string keywords and is left alone. This mirrors the
+// URL-DSN redaction below: both scrub the known credential shape, not every
+// possible substring that could theoretically be a password fragment.
+var libpqCredentialRe = regexp.MustCompile(`(?i)\b(password|pwd)=('[^']*'|\S+)`)
+
 // redactLikelyCredentialsInLine scans a single line of subprocess output for
-// a scheme://user:pass@host pattern (a DB DSN, or a URL with embedded
-// credentials) and redacts the credential portion, mirroring
-// internal/db.redactDSN. Ordinary Python tracebacks and print() output never
-// match this pattern, so it is a no-op for the overwhelming majority of
-// lines.
+// credential-bearing patterns and redacts them:
+//   - a scheme://user:pass@host pattern (a DB DSN, or a URL with embedded
+//     credentials), mirroring internal/db.redactDSN
+//   - a libpq keyword/value password=... or pwd=... token (see
+//     libpqCredentialRe)
+//
+// Ordinary Python tracebacks and print() output rarely match either pattern,
+// so this is a no-op for the overwhelming majority of lines.
 func redactLikelyCredentialsInLine(line string) string {
+	line = redactURLCredentials(line)
+	return libpqCredentialRe.ReplaceAllString(line, "${1}=[REDACTED]")
+}
+
+// redactURLCredentials redacts the credential portion of a scheme://user:pass@host
+// pattern (a DB DSN, or a URL with embedded credentials), mirroring
+// internal/db.redactDSN.
+func redactURLCredentials(line string) string {
 	schemeIdx := strings.Index(line, "://")
 	if schemeIdx == -1 {
 		return line

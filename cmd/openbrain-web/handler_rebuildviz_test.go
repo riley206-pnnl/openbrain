@@ -645,6 +645,53 @@ func TestBoundedOutputTail_RedactsCredentialLikeLines(t *testing.T) {
 	assert.Contains(t, tail, "ConnectionError: could not connect")
 }
 
+// TestBoundedOutputTail_RedactsLibpqPasswordKeyValue confirms a libpq
+// keyword/value credential token (password=... or pwd=..., the form
+// build-brain-viz.py actually builds its conninfo string in, never a URL) has
+// its value redacted, while unrelated keyword/value pairs on the same line
+// pass through unchanged.
+func TestBoundedOutputTail_RedactsLibpqPasswordKeyValue(t *testing.T) {
+	out := "connecting with host=db.internal user=openbrain password=hunter2 sslmode=disable\n"
+	tail := boundedOutputTail([]byte(out))
+	assert.NotContains(t, tail, "hunter2", "a libpq password= value must not be echoed verbatim")
+	assert.Contains(t, tail, "password=[REDACTED]")
+	assert.Contains(t, tail, "host=db.internal", "unrelated keyword/value pairs must not be touched")
+	assert.Contains(t, tail, "sslmode=disable", "unrelated keyword/value pairs must not be touched")
+}
+
+// TestBoundedOutputTail_RedactsLibpqPwdKeyValue confirms the "pwd=" alias is
+// also redacted, case-insensitively.
+func TestBoundedOutputTail_RedactsLibpqPwdKeyValue(t *testing.T) {
+	out := "PWD=s3cr3t user=openbrain\n"
+	tail := boundedOutputTail([]byte(out))
+	assert.NotContains(t, tail, "s3cr3t")
+	assert.Contains(t, tail, "[REDACTED]")
+}
+
+// TestBoundedOutputTail_RedactsMalformedConninfoPasswordFragment pins the
+// concrete leak this fix closes: OPENBRAIN_DB_PASSWORD containing a space
+// (e.g. a diceware passphrase) makes build-brain-viz.py's unquoted
+// "password=<value>" conninfo construction unparsable by psycopg, which
+// raises psycopg.ProgrammingError: missing "=" after "<word>" in connection
+// info string, and (per the real failure) the preceding captured output
+// contains the literal password=<value> assignment with the spaced value.
+//
+// A spaced, unquoted password cannot be fully bounded by a keyword/value
+// regex (libpq's own grammar can't tell where an unquoted value ends either:
+// that's exactly why it raised the parse error), so this test pins the
+// documented minimum: the token contiguous to "password=" is scrubbed. Words
+// after the first space are not distinguishable from any other connection
+// keyword and are accepted as a known limitation (see libpqCredentialRe's
+// doc comment).
+func TestBoundedOutputTail_RedactsMalformedConninfoPasswordFragment(t *testing.T) {
+	out := "building conninfo: host=localhost user=openbrain password=correct horse battery staple sslmode=disable\n" +
+		"psycopg.ProgrammingError: missing \"=\" after \"horse\" in connection info string\n"
+	tail := boundedOutputTail([]byte(out))
+	assert.NotContains(t, tail, "password=correct", "the token contiguous to password= must be scrubbed")
+	assert.Contains(t, tail, "password=[REDACTED]")
+	assert.Contains(t, tail, "missing \"=\" after \"horse\" in connection info string", "the error message itself is not a credential and must survive so the operator can diagnose it")
+}
+
 // ── review fix: distinguish the 5-minute rebuild timeout ────────────────
 
 // TestClassifyVizRebuildFailure_DeadlineExceeded_DistinctMessage unit-tests
