@@ -1161,7 +1161,7 @@ async function fetchVizStatus() {
 }
 
 // Starts a rebuild. A 409 means another caller already owns the in-flight
-// job — that is not a failure here, the caller just polls instead of
+// job: that is not a failure here, the caller just polls instead of
 // reposting (per the plan's concurrency-guard contract).
 async function triggerVizRebuild() {
   const res = await fetch('/api/rebuild-viz' + tokenQS(), { method: 'POST' });
@@ -1430,7 +1430,7 @@ async function checkVizStatusAndLoad() {
   }
 }
 
-// Manual "Rebuild map" button — rides the same async trigger + poll + bar
+// Manual "Rebuild map" button: rides the same async trigger + poll + bar
 // path as the auto-triggers (the backend endpoint is async now, so the old
 // synchronous-200 await no longer matches its contract). Goes through the
 // same beginVizSession/endVizSession single-flight guard as the auto paths,
