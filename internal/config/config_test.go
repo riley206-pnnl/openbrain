@@ -2,6 +2,7 @@ package config
 
 import (
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 
@@ -288,6 +289,55 @@ func TestMCPServerVersion_EnvOverridesVersionVar(t *testing.T) {
 	assert.NoError(t, err)
 	assert.Equal(t, "9.9.9", cfg.MCPServerVersion,
 		"OPENBRAIN_MCP_SERVER_VERSION env var must override version.Version")
+}
+
+// TestVizTTL_DefaultsTo24h confirms an unset OPENBRAIN_VIZ_TTL resolves to
+// the 24h default, not zero (which would mean "staleness disabled").
+func TestVizTTL_DefaultsTo24h(t *testing.T) {
+	cfg, err := Load()
+	assert.NoError(t, err)
+	assert.Equal(t, 24*time.Hour, cfg.VizTTL)
+}
+
+// TestVizTTL_EmptyDisablesStaleness is the item this hand-parsed field
+// exists for: caarlos0/env's tag-based defaulting would collapse an
+// explicitly-empty env var into the envDefault, making this indistinguishable
+// from unset. parseVizTTL must not do that.
+func TestVizTTL_EmptyDisablesStaleness(t *testing.T) {
+	t.Setenv("OPENBRAIN_VIZ_TTL", "")
+	cfg, err := Load()
+	assert.NoError(t, err)
+	assert.Zero(t, cfg.VizTTL)
+}
+
+func TestVizTTL_ZeroDisablesStaleness(t *testing.T) {
+	t.Setenv("OPENBRAIN_VIZ_TTL", "0")
+	cfg, err := Load()
+	assert.NoError(t, err)
+	assert.Zero(t, cfg.VizTTL)
+}
+
+func TestVizTTL_CustomValueFromEnv(t *testing.T) {
+	t.Setenv("OPENBRAIN_VIZ_TTL", "1h")
+	cfg, err := Load()
+	assert.NoError(t, err)
+	assert.Equal(t, time.Hour, cfg.VizTTL)
+}
+
+func TestVizTTL_MalformedValue_FailsLoad(t *testing.T) {
+	t.Setenv("OPENBRAIN_VIZ_TTL", "not-a-duration")
+	_, err := Load()
+	if assert.Error(t, err) {
+		assert.Contains(t, err.Error(), "OPENBRAIN_VIZ_TTL")
+	}
+}
+
+func TestVizTTL_NegativeValue_FailsLoad(t *testing.T) {
+	t.Setenv("OPENBRAIN_VIZ_TTL", "-1h")
+	_, err := Load()
+	if assert.Error(t, err) {
+		assert.Contains(t, err.Error(), "OPENBRAIN_VIZ_TTL")
+	}
 }
 
 func TestTesseractLangsValidation_AcceptsValid(t *testing.T) {

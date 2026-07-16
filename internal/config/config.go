@@ -4,10 +4,12 @@ package config
 import (
 	"fmt"
 	"log/slog"
+	"os"
 	"regexp"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/caarlos0/env/v11"
 	"github.com/joho/godotenv"
@@ -125,6 +127,11 @@ type Config struct {
 	// Brain visualization
 	VizScriptPath string `env:"OPENBRAIN_VIZ_SCRIPT_PATH"` // path to build-brain-viz.py; empty disables the rebuild endpoint
 	VizOutputPath string `env:"OPENBRAIN_VIZ_OUTPUT_PATH"` // path where brain.json is written and served from disk
+	// VizTTL is the max age of brain.json before /api/rebuild-viz/status
+	// reports it stale. Parsed by hand in Load (env:"-" here), not through
+	// the struct tag: see parseVizTTL for why an explicitly empty env var
+	// must be distinguishable from unset.
+	VizTTL time.Duration `env:"-"`
 }
 
 // DBUrl returns the PostgreSQL connection string.
@@ -255,6 +262,36 @@ func validateOAuth(c *Config) error {
 	return nil
 }
 
+// defaultVizTTL is the staleness window for brain.json when OPENBRAIN_VIZ_TTL
+// is not set at all. See parseVizTTL for the unset-vs-empty distinction.
+const defaultVizTTL = 24 * time.Hour
+
+// parseVizTTL resolves OPENBRAIN_VIZ_TTL into a time.Duration.
+//
+// This is parsed by hand rather than through caarlos0/env's envDefault
+// struct tag because that library's default-value resolution (see getOr in
+// env.go) collapses an explicitly-empty env var into envDefault whenever a
+// default is configured, making OPENBRAIN_VIZ_TTL="" indistinguishable from
+// OPENBRAIN_VIZ_TTL unset. The two must differ here: unset means the 24h
+// default; "" (or "0"/"0s", any zero duration) means staleness is disabled.
+// isSet mirrors the second return value of os.LookupEnv.
+func parseVizTTL(raw string, isSet bool) (time.Duration, error) {
+	if !isSet {
+		return defaultVizTTL, nil
+	}
+	if raw == "" {
+		return 0, nil
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil {
+		return 0, fmt.Errorf("invalid OPENBRAIN_VIZ_TTL %q: %w", raw, err)
+	}
+	if d < 0 {
+		return 0, fmt.Errorf("invalid OPENBRAIN_VIZ_TTL %q: must not be negative", raw)
+	}
+	return d, nil
+}
+
 // Load reads .env and parses environment variables into a Config.
 // Each call creates a fresh Config — the caller owns the result.
 func Load() (*Config, error) {
@@ -286,6 +323,12 @@ func Load() (*Config, error) {
 	if err := validateWebWSToken(c); err != nil {
 		return nil, err
 	}
+	rawTTL, ttlSet := os.LookupEnv("OPENBRAIN_VIZ_TTL")
+	ttl, err := parseVizTTL(rawTTL, ttlSet)
+	if err != nil {
+		return nil, err
+	}
+	c.VizTTL = ttl
 	return c, nil
 }
 
