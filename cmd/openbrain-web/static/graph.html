@@ -302,6 +302,84 @@
     }
     #state-overlay.hidden { display: none; }
 
+    /* ── viz build progress bar (blocking, full-screen, inside #state-overlay) ── */
+    #viz-progress-wrap {
+      width: 240px;
+      margin-top: 4px;
+      pointer-events: auto;
+    }
+    #viz-progress-wrap.hidden { display: none; }
+    #viz-progress-bar {
+      width: 100%;
+      height: 8px;
+      background: var(--surface2);
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      overflow: hidden;
+    }
+    #viz-progress-fill {
+      height: 100%;
+      width: 0%;
+      background: var(--accent);
+      transition: width 0.25s ease;
+    }
+    #viz-progress-label {
+      margin-top: 6px;
+      font-size: 0.72rem;
+      color: var(--text-dim);
+      text-align: center;
+    }
+
+    /* ── viz refresh indicator (non-blocking corner, stale/background refresh) ── */
+    #refresh-indicator {
+      position: absolute;
+      left: 14px;
+      bottom: 14px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 8px 12px;
+      font-size: 0.72rem;
+      color: var(--text-dim);
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      z-index: 50;
+      box-shadow: 0 4px 16px rgba(0,0,0,0.4);
+      pointer-events: auto;
+    }
+    #refresh-indicator.hidden { display: none; }
+    #refresh-indicator-body { display: flex; flex-direction: column; gap: 5px; }
+    #refresh-indicator-bar {
+      width: 160px;
+      height: 5px;
+      background: var(--surface2);
+      border: 1px solid var(--border);
+      border-radius: 3px;
+      overflow: hidden;
+    }
+    #refresh-indicator-fill {
+      height: 100%;
+      width: 0%;
+      background: var(--accent);
+      transition: width 0.25s ease;
+    }
+    #refresh-indicator-label { line-height: 1.4; }
+    #refresh-dismiss-btn {
+      flex-shrink: 0;
+      background: transparent;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      color: var(--text-dim);
+      font-family: var(--font);
+      font-size: 0.7rem;
+      padding: 2px 6px;
+      cursor: pointer;
+      transition: border-color 0.15s, color 0.15s;
+    }
+    #refresh-dismiss-btn:hover { border-color: var(--red); color: var(--red); }
+    #refresh-dismiss-btn.hidden { display: none; }
+
     /* ── thought detail panel (slides in from right) ── */
     #detail-panel {
       position: fixed;
@@ -613,6 +691,19 @@
     <div id="state-overlay">
       <div class="icon">🧠</div>
       <p id="state-msg">Loading brain map…</p>
+      <div id="viz-progress-wrap" class="hidden">
+        <div id="viz-progress-bar" role="progressbar" aria-label="Brain map build progress"
+             aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><div id="viz-progress-fill"></div></div>
+        <p id="viz-progress-label"></p>
+      </div>
+    </div>
+    <div id="refresh-indicator" class="hidden">
+      <div id="refresh-indicator-body">
+        <div id="refresh-indicator-bar" role="progressbar" aria-label="Brain map refresh progress"
+             aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><div id="refresh-indicator-fill"></div></div>
+        <span id="refresh-indicator-label">Refreshing map…</span>
+      </div>
+      <button id="refresh-dismiss-btn" class="hidden" title="Dismiss">✕</button>
     </div>
   </div>
   <aside id="legend">
@@ -1001,29 +1092,259 @@ document.getElementById('btn-timeline-reset').addEventListener('click', () => {
   scheduleRender();
 });
 
-// ── rebuild map ───────────────────────────────────────────────────────────────
-document.getElementById('btn-rebuild').addEventListener('click', async function() {
-  const btn = this;
-  btn.disabled = true;
-  btn.textContent = 'Rebuilding…';
+// ── brain-map auto-generate: status polling, progress bar, trigger ─────────────
+//
+// On load, checkVizStatusAndLoad() consults GET /api/rebuild-viz/status and
+// branches per the plan's missing/fresh/stale table (see
+// plan-2-auto-generate-brain-map/plan.md, "Frontend branch table"):
+//   - missing (exists:false): block full-screen with a determinate bar, POST
+//     (unless a build is already running), poll to done, then loadData().
+//   - fresh (exists:true, !stale, not running): plain loadData(), no trigger.
+//   - stale or a build already running (exists:true, stale:true or
+//     state:running): serve the existing map immediately, POST in the
+//     background (skip if already running), corner progress indicator,
+//     poll to done, loadData() again to swap in the fresh map.
+// The existing manual "Rebuild map" button rides the same trigger + poll +
+// bar path (previously it awaited a synchronous 200, which the backend no
+// longer returns).
+
+const vizProgressWrap   = document.getElementById('viz-progress-wrap');
+const vizProgressBar    = document.getElementById('viz-progress-bar');
+const vizProgressFill   = document.getElementById('viz-progress-fill');
+const vizProgressLabel  = document.getElementById('viz-progress-label');
+const refreshIndicator      = document.getElementById('refresh-indicator');
+const refreshIndicatorBar   = document.getElementById('refresh-indicator-bar');
+const refreshIndicatorFill  = document.getElementById('refresh-indicator-fill');
+const refreshIndicatorLabel = document.getElementById('refresh-indicator-label');
+const refreshDismissBtn     = document.getElementById('refresh-dismiss-btn');
+const rebuildBtn            = document.getElementById('btn-rebuild');
+
+const VIZ_POLL_INTERVAL_MS = 1000;
+const VIZ_POLL_TIMEOUT_MS  = 5 * 60 * 1000; // matches the backend's 5-minute build ceiling
+
+function tokenQS() {
   const token = new URLSearchParams(location.search).get('token') || '';
-  const url = '/api/rebuild-viz' + (token ? '?token=' + encodeURIComponent(token) : '');
-  try {
-    const res = await fetch(url, { method: 'POST' });
-    if (!res.ok) {
-      const msg = await res.text();
-      alert('Rebuild failed: ' + msg);
+  return token ? '?token=' + encodeURIComponent(token) : '';
+}
+
+async function fetchVizStatus() {
+  const res = await fetch('/api/rebuild-viz/status' + tokenQS());
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return res.json();
+}
+
+// Starts a rebuild. A 409 means another caller already owns the in-flight
+// job — that is not a failure here, the caller just polls instead of
+// reposting (per the plan's concurrency-guard contract).
+async function triggerVizRebuild() {
+  const res = await fetch('/api/rebuild-viz' + tokenQS(), { method: 'POST' });
+  if (res.ok || res.status === 409) return;
+  const msg = await res.text().catch(() => '');
+  throw new Error(msg || `HTTP ${res.status}`);
+}
+
+const VIZ_PHASE_TEXT = {
+  loading: 'Loading thoughts…', projecting: 'Projecting map…',
+  clustering: 'Finding regions…', edges: 'Connecting related thoughts…',
+  labeling: 'Labeling regions…', writing: 'Saving map…', done: 'Done',
+};
+
+function vizPhaseLabel(status) {
+  if (status.phase === 'labeling' && status.clusters_total > 0) {
+    return `Labeling regions ${status.clusters_done}/${status.clusters_total}`;
+  }
+  return VIZ_PHASE_TEXT[status.phase] || 'Building brain map…';
+}
+
+function setVizProgress(status) {
+  const pct = Math.max(0, Math.min(100, status.pct || 0));
+  const label = `${vizPhaseLabel(status)} (${pct}%)`;
+  vizProgressFill.style.width = pct + '%';
+  vizProgressLabel.textContent = label;
+  vizProgressBar.setAttribute('aria-valuenow', String(pct));
+  refreshIndicatorFill.style.width = pct + '%';
+  refreshIndicatorLabel.textContent = label;
+  refreshIndicatorBar.setAttribute('aria-valuenow', String(pct));
+}
+
+function showBlockingProgress() {
+  stateMsg.textContent = 'Building your brain map for the first time…';
+  vizProgressWrap.classList.remove('hidden');
+  vizProgressFill.style.width = '0%';
+  vizProgressLabel.textContent = 'Starting…';
+  overlay.classList.remove('hidden');
+}
+
+// Never leaves the bar stuck below 100: the progress bar is hidden and the
+// error points the user at the always-visible manual "Rebuild map" button
+// (in the controls bar, unaffected by the overlay) as the retry path.
+function showBlockingError(message) {
+  vizProgressWrap.classList.add('hidden');
+  stateMsg.innerHTML =
+    'Failed to build brain map: ' + esc(message) + '<br>' +
+    'Click <strong>Rebuild map</strong> above to retry.';
+  overlay.classList.remove('hidden');
+}
+
+function showRefreshIndicator() {
+  refreshIndicator.classList.remove('hidden');
+  refreshDismissBtn.classList.add('hidden');
+  refreshIndicatorFill.style.width = '0%';
+  refreshIndicatorLabel.textContent = 'Refreshing map…';
+}
+
+function hideRefreshIndicator() {
+  refreshIndicator.classList.add('hidden');
+}
+
+function showRefreshError(message) {
+  refreshIndicatorFill.style.width = '0%';
+  refreshIndicatorLabel.innerHTML =
+    'Refresh failed: ' + esc(message) + '<br>Click Rebuild map to retry.';
+  refreshDismissBtn.classList.remove('hidden');
+}
+
+refreshDismissBtn.addEventListener('click', hideRefreshIndicator);
+
+let vizPollHandle = null;
+
+// Stops any in-flight poll timer. At most one poll loop runs at a time:
+// pollVizStatus calls this before scheduling its own tick, so a manual
+// rebuild click and an in-progress background/blocking poll never race.
+function stopVizPoll() {
+  if (vizPollHandle) { clearTimeout(vizPollHandle); vizPollHandle = null; }
+}
+
+// Polls GET /api/rebuild-viz/status on a fixed interval until the job
+// reaches done or error, or the poll exceeds VIZ_POLL_TIMEOUT_MS (bounded to
+// the backend's 5-minute build ceiling, so a hung/unreachable build resolves
+// to a clear error instead of an indefinite spinner). onProgress fires on
+// every status; onDone/onError fire exactly once, terminally.
+function pollVizStatus({ onProgress, onDone, onError }) {
+  stopVizPoll();
+  const deadline = Date.now() + VIZ_POLL_TIMEOUT_MS;
+
+  const tick = async () => {
+    let status;
+    try {
+      status = await fetchVizStatus();
+    } catch (err) {
+      onError(err.message);
       return;
     }
-    btn.textContent = 'Reloading…';
-    DATA = null;
-    await loadData();
+    onProgress(status);
+
+    if (status.state === 'done') { onDone(status); return; }
+    if (status.state === 'error') { onError(status.error || 'rebuild failed'); return; }
+    if (Date.now() > deadline) { onError('timed out waiting for the brain map to build'); return; }
+
+    vizPollHandle = setTimeout(tick, VIZ_POLL_INTERVAL_MS);
+  };
+
+  tick();
+}
+
+// Degraded builds are still valid (heuristic labels only, Ollama was
+// unreachable during the run) — per the plan, render normally and just note
+// it, never treat degraded as an error.
+function noteDegraded() {
+  const el = document.getElementById('header-stats');
+  if (el) el.textContent += ' · labels heuristic (Ollama unreachable during build)';
+}
+
+async function finishVizLoad(status) {
+  await loadData();
+  if (status.degraded) noteDegraded();
+}
+
+// Blocking path: brain.json is missing, nothing usable to show yet.
+async function runBlockingBuild(alreadyRunning) {
+  showBlockingProgress();
+  try {
+    if (!alreadyRunning) await triggerVizRebuild();
   } catch (err) {
-    alert('Rebuild error: ' + err.message);
-  } finally {
-    btn.disabled = false;
-    btn.textContent = 'Rebuild map';
+    showBlockingError(err.message);
+    return;
   }
+  pollVizStatus({
+    onProgress: setVizProgress,
+    onDone: finishVizLoad,
+    onError: showBlockingError,
+  });
+}
+
+// Background path: a usable (if stale) map is already rendered by the
+// caller before this runs. Never blocks the current view.
+async function runBackgroundRefresh(alreadyRunning) {
+  showRefreshIndicator();
+  try {
+    if (!alreadyRunning) await triggerVizRebuild();
+  } catch (err) {
+    showRefreshError(err.message);
+    return;
+  }
+  pollVizStatus({
+    onProgress: setVizProgress,
+    onDone: async (status) => { hideRefreshIndicator(); await finishVizLoad(status); },
+    onError: showRefreshError,
+  });
+}
+
+// Entry point, called on page load in place of a bare loadData().
+async function checkVizStatusAndLoad() {
+  let status;
+  try {
+    status = await fetchVizStatus();
+  } catch (err) {
+    // Status endpoint itself unreachable — fall back to a plain data load so
+    // a status-endpoint hiccup doesn't block an otherwise-servable map.
+    await loadData();
+    return;
+  }
+
+  const running = status.state === 'running';
+
+  if (!status.exists) {
+    await runBlockingBuild(running);
+    return;
+  }
+
+  await loadData();
+
+  if (running || status.stale) {
+    await runBackgroundRefresh(running);
+  }
+}
+
+// Manual "Rebuild map" button — rides the same async trigger + poll + bar
+// path as the auto-triggers (the backend endpoint is async now, so the old
+// synchronous-200 await no longer matches its contract).
+rebuildBtn.addEventListener('click', async function() {
+  rebuildBtn.disabled = true;
+  rebuildBtn.textContent = 'Rebuilding…';
+  showRefreshIndicator();
+  try {
+    await triggerVizRebuild();
+  } catch (err) {
+    showRefreshError(err.message);
+    rebuildBtn.disabled = false;
+    rebuildBtn.textContent = 'Rebuild map';
+    return;
+  }
+  pollVizStatus({
+    onProgress: setVizProgress,
+    onDone: async (status) => {
+      hideRefreshIndicator();
+      await finishVizLoad(status);
+      rebuildBtn.disabled = false;
+      rebuildBtn.textContent = 'Rebuild map';
+    },
+    onError: (msg) => {
+      showRefreshError(msg);
+      rebuildBtn.disabled = false;
+      rebuildBtn.textContent = 'Rebuild map';
+    },
+  });
 });
 
 // ── legend ────────────────────────────────────────────────────────────────────
@@ -1360,7 +1681,7 @@ async function loadData() {
 }
 
 window.addEventListener('resize', resize);
-loadData();
+checkVizStatusAndLoad();
 })();
 </script>
 </body>
