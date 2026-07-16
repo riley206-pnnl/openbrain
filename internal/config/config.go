@@ -137,6 +137,14 @@ type Config struct {
 	// the struct tag: see parseVizTTL for why an explicitly empty env var
 	// must be distinguishable from unset.
 	VizTTL time.Duration `env:"-"`
+	// VizRebuildTimeout is the safety-bound ceiling on a single
+	// build-brain-viz.py run. Not env-configurable (env:"-", no struct tag
+	// wired to Load): production always resolves through
+	// VizRebuildTimeoutOrDefault(), which falls back to
+	// defaultVizRebuildTimeout. This field exists so tests can override it to
+	// a few milliseconds and exercise the timeout-classification path without
+	// a real 5-minute wait.
+	VizRebuildTimeout time.Duration `env:"-"`
 }
 
 // DBUrl returns the PostgreSQL connection string.
@@ -169,6 +177,21 @@ func (c *Config) VizPythonInterpreter() string {
 		return "python3"
 	}
 	return c.VizPythonPath
+}
+
+// defaultVizRebuildTimeout is the safety-bound ceiling on Ollama being slow
+// or unreachable, not the expected duration of a rebuild (see plan.md).
+const defaultVizRebuildTimeout = 5 * time.Minute
+
+// VizRebuildTimeoutOrDefault returns VizRebuildTimeout when set, or
+// defaultVizRebuildTimeout (5 minutes) otherwise. A Config built directly
+// with the field left zero (as every production path and most tests do)
+// gets the same 5-minute ceiling that predates this field's existence.
+func (c *Config) VizRebuildTimeoutOrDefault() time.Duration {
+	if c.VizRebuildTimeout <= 0 {
+		return defaultVizRebuildTimeout
+	}
+	return c.VizRebuildTimeout
 }
 
 // MCPAllowedHostsList splits MCPAllowedHosts into a trimmed slice, dropping

@@ -1,7 +1,9 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -478,4 +480,215 @@ func TestApiRebuildVizStatus_DoneState_Degraded(t *testing.T) {
 	assert.Equal(t, "done", body.State)
 	assert.True(t, body.Degraded)
 	assert.Empty(t, body.Error)
+}
+
+// ── review fix: reset stale state on re-trigger ─────────────────────────
+
+// TestApiRebuildViz_ReTriggerAfterCompletion_ResetsStaleState drives a full
+// rebuild to completion (degraded, so both lastErr==nil and degraded==true
+// are non-zero-value), then triggers a SECOND rebuild and confirms
+// tryStart succeeds again AND /status no longer reports the PRIOR run's
+// degraded flag or stale progress while the new run is in flight: the
+// second run's job state must start clean, not carry the first run's
+// leftovers forward.
+func TestApiRebuildViz_ReTriggerAfterCompletion_ResetsStaleState(t *testing.T) {
+	invocationLog := filepath.Join(t.TempDir(), "invocations.log")
+	lockFile := filepath.Join(t.TempDir(), "release.lock")
+	outputPath := filepath.Join(t.TempDir(), "brain.json")
+
+	// First run: degraded, so job.degraded lands on true and the sidecar is
+	// left at pct:100/phase:done.
+	firstScript := writeFakeVizScript(t, invocationLog, `
+with open(`+pyStr(vizProgressPath(outputPath))+`, 'w') as f:
+    f.write('{"pct":100,"phase":"done","clusters_done":3,"clusters_total":3}')
+print("BRAIN_VIZ_DEGRADED=true")
+`)
+	cfg := &config.Config{VizScriptPath: firstScript, VizOutputPath: outputPath}
+	job := &vizJobState{}
+	h := apiRebuildViz(cfg, job)
+
+	req1 := httptest.NewRequest(http.MethodPost, "/api/rebuild-viz", nil)
+	rr1 := httptest.NewRecorder()
+	h(rr1, req1)
+	require.Equal(t, http.StatusAccepted, rr1.Code)
+	waitForJobDone(t, job)
+
+	firstStatus := getRebuildVizStatus(t, cfg, job)
+	require.Equal(t, "done", firstStatus.State)
+	require.True(t, firstStatus.Degraded, "test setup: first run must be degraded")
+	require.Equal(t, 100, firstStatus.Pct, "test setup: first run must leave pct:100 in the sidecar")
+
+	// Second run: a clean (non-degraded) build that blocks on lockFile so we
+	// can observe /status WHILE it is running, before it has written its own
+	// first progress update.
+	cfg.VizScriptPath = writeFakeVizScript(t, invocationLog, `
+import time
+deadline = time.time() + 5
+while not os.path.exists(`+pyStr(lockFile)+`):
+    if time.time() > deadline:
+        raise SystemExit("test lock file never appeared")
+    time.sleep(0.01)
+print("all clusters labeled via LLM")
+`)
+
+	req2 := httptest.NewRequest(http.MethodPost, "/api/rebuild-viz", nil)
+	rr2 := httptest.NewRecorder()
+	h(rr2, req2)
+	require.Equal(t, http.StatusAccepted, rr2.Code, "tryStart must succeed again after the first run completed")
+
+	midRunStatus := getRebuildVizStatus(t, cfg, job)
+	assert.Equal(t, "running", midRunStatus.State)
+	assert.False(t, midRunStatus.Degraded, "the second run's mid-flight status must not carry the first run's degraded=true forward")
+	assert.Zero(t, midRunStatus.Pct, "the second run's mid-flight status must not carry the first run's stale pct:100 forward")
+	assert.Empty(t, midRunStatus.Phase, "the second run's mid-flight status must not carry the first run's stale phase:done forward")
+
+	require.NoError(t, os.WriteFile(lockFile, []byte("go"), 0o644))
+	waitForJobDone(t, job)
+
+	finalStatus := getRebuildVizStatus(t, cfg, job)
+	assert.Equal(t, "done", finalStatus.State)
+	assert.False(t, finalStatus.Degraded, "the second (clean) run must report degraded:false, not the first run's true")
+}
+
+// ── review fix: TTL boundary is >, not >= ────────────────────────────────
+
+// TestVizIsStale_TTLBoundary asserts the staleness check's boundary
+// condition directly (elapsed == ttl exactly), which is not reliably
+// reproducible through a real file mtime and wall-clock time.Since call:
+// by the time the check runs, elapsed is always at least a few nanoseconds
+// past whatever offset the test set up. Exercising the pure comparison
+// function pins the boundary regardless of wall-clock jitter.
+func TestVizIsStale_TTLBoundary(t *testing.T) {
+	ttl := 24 * time.Hour
+
+	tests := []struct {
+		name    string
+		elapsed time.Duration
+		want    bool
+	}{
+		{"elapsed exactly equals ttl: not stale", ttl, false},
+		{"elapsed one nanosecond under ttl: not stale", ttl - 1, false},
+		{"elapsed one nanosecond over ttl: stale", ttl + 1, true},
+		{"ttl disabled (0): never stale even with huge elapsed", 0, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			effectiveTTL := ttl
+			if tt.name == "ttl disabled (0): never stale even with huge elapsed" {
+				effectiveTTL = 0
+				tt.elapsed = 30 * 24 * time.Hour
+			}
+			assert.Equal(t, tt.want, vizIsStale(effectiveTTL, tt.elapsed))
+		})
+	}
+}
+
+// ── review fix: bounded failure-output tail surfaced in /status error ───
+
+// TestApiRebuildViz_FailureOutput_TailSurfacedInStatusError confirms a
+// failing script's captured output (not just the bare process error like
+// "exit status 1") flows through into /status's error field, bounded, so an
+// operator can see WHY it failed (missing deps, DB down, Ollama down)
+// without reading the server log.
+func TestApiRebuildViz_FailureOutput_TailSurfacedInStatusError(t *testing.T) {
+	const marker = "OPENBRAIN_TEST_MARKER_missing_dependency_numpy"
+	cfg := rebuildVizCfg(t, `import sys
+print("`+marker+`")
+sys.exit(1)
+`)
+	job := &vizJobState{}
+	h := apiRebuildViz(cfg, job)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/rebuild-viz", nil)
+	rr := httptest.NewRecorder()
+	h(rr, req)
+	require.Equal(t, http.StatusAccepted, rr.Code)
+
+	waitForJobDone(t, job)
+	body := getRebuildVizStatus(t, cfg, job)
+	assert.Equal(t, "error", body.State)
+	assert.Contains(t, body.Error, marker, "the failure's captured stdout must be surfaced in the status error field, not just the bare exit code")
+}
+
+// TestBoundedOutputTail_CapsLength confirms the tail helper never returns
+// more than vizOutputTailMaxLen bytes of payload, even when the captured
+// output is far larger (a runaway script must not turn /status into an
+// unbounded log dump).
+func TestBoundedOutputTail_CapsLength(t *testing.T) {
+	huge := strings.Repeat("x", vizOutputTailMaxLen*10)
+	tail := boundedOutputTail([]byte(huge))
+	assert.LessOrEqual(t, len(tail), vizOutputTailMaxLen+len("...(truncated)...\n"))
+	assert.Contains(t, tail, "truncated")
+}
+
+// TestBoundedOutputTail_KeepsEndOfOutput confirms truncation preserves the
+// END of the captured output (the traceback / final error line is almost
+// always last), not the start.
+func TestBoundedOutputTail_KeepsEndOfOutput(t *testing.T) {
+	huge := strings.Repeat("x", vizOutputTailMaxLen*10) + "FINAL_ERROR_LINE"
+	tail := boundedOutputTail([]byte(huge))
+	assert.Contains(t, tail, "FINAL_ERROR_LINE")
+}
+
+// TestBoundedOutputTail_RedactsCredentialLikeLines confirms a line that
+// looks like a DSN or URL with embedded credentials (scheme://user:pass@host)
+// has the credential portion redacted, mirroring internal/db.redactDSN,
+// while ordinary Python traceback lines pass through unchanged.
+func TestBoundedOutputTail_RedactsCredentialLikeLines(t *testing.T) {
+	out := "connecting to postgres://openbrain:s3cr3t@db.internal:5432/openbrain\n" +
+		"Traceback (most recent call last):\n" +
+		"  File \"build-brain-viz.py\", line 42, in <module>\n" +
+		"ConnectionError: could not connect\n"
+	tail := boundedOutputTail([]byte(out))
+	assert.NotContains(t, tail, "s3cr3t", "a credential embedded in a DSN-like line must not be echoed verbatim")
+	assert.Contains(t, tail, "postgres://***@db.internal:5432/openbrain")
+	assert.Contains(t, tail, "ConnectionError: could not connect")
+}
+
+// ── review fix: distinguish the 5-minute rebuild timeout ────────────────
+
+// TestClassifyVizRebuildFailure_DeadlineExceeded_DistinctMessage unit-tests
+// the classification helper directly with a synthetic context.DeadlineExceeded,
+// rather than waiting out a real timeout: the helper is the single seam
+// runVizRebuild calls into, so this pins the branch without a slow test.
+func TestClassifyVizRebuildFailure_DeadlineExceeded_DistinctMessage(t *testing.T) {
+	cmdErr := errors.New("signal: killed")
+	got := classifyVizRebuildFailure(cmdErr, context.DeadlineExceeded, []byte("some partial output"), 5*time.Minute)
+	assert.ErrorContains(t, got, "timed out")
+	assert.NotContains(t, got.Error(), "signal: killed", "the opaque exec-killed message must not leak through when the real cause is a timeout")
+}
+
+// TestClassifyVizRebuildFailure_OrdinaryFailure_IncludesOutputTail confirms
+// the non-timeout branch still wraps the process error and appends the
+// bounded output tail.
+func TestClassifyVizRebuildFailure_OrdinaryFailure_IncludesOutputTail(t *testing.T) {
+	cmdErr := errors.New("exit status 1")
+	got := classifyVizRebuildFailure(cmdErr, nil, []byte("ModuleNotFoundError: No module named 'numpy'"), 5*time.Minute)
+	assert.ErrorContains(t, got, "exit status 1")
+	assert.ErrorContains(t, got, "ModuleNotFoundError")
+}
+
+// TestApiRebuildViz_RealTimeout_ReportsDistinctError drives an actual
+// context deadline through runVizRebuild end-to-end (not just the
+// classify-helper unit test above), using cfg.VizRebuildTimeout overridden
+// to a few milliseconds so the test stays fast.
+func TestApiRebuildViz_RealTimeout_ReportsDistinctError(t *testing.T) {
+	cfg := rebuildVizCfg(t, `
+import time
+time.sleep(5)
+print("should never get here")
+`)
+	cfg.VizRebuildTimeout = 50 * time.Millisecond
+	job := &vizJobState{}
+	h := apiRebuildViz(cfg, job)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/rebuild-viz", nil)
+	rr := httptest.NewRecorder()
+	h(rr, req)
+	require.Equal(t, http.StatusAccepted, rr.Code)
+
+	waitForJobDone(t, job)
+	body := getRebuildVizStatus(t, cfg, job)
+	assert.Equal(t, "error", body.State)
+	assert.Contains(t, body.Error, "timed out")
 }

@@ -5,6 +5,7 @@ import (
 	"crypto/subtle"
 	"embed"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io/fs"
 	"log/slog"
@@ -611,6 +612,14 @@ type vizJobState struct {
 // concurrency guard: apiRebuildViz calls it before spawning the goroutine,
 // so of any number of overlapping POSTs, exactly one wins the race and the
 // rest observe running already true and return 409.
+//
+// It also clears lastErr/degraded from the PRIOR run. Without this, a fresh
+// run's mid-flight /status response would still report the previous run's
+// degraded/error values: apiRebuildVizStatus only recomputes errMsg for the
+// hasRun-and-lastErr-non-nil branch, but passes degraded straight through
+// from the snapshot regardless of state, so a stale "degraded":true (or a
+// stale error) would sit alongside "state":"running" until THIS run's own
+// job.finish overwrites it.
 func (j *vizJobState) tryStart() bool {
 	j.mu.Lock()
 	defer j.mu.Unlock()
@@ -618,6 +627,8 @@ func (j *vizJobState) tryStart() bool {
 		return false
 	}
 	j.running = true
+	j.lastErr = nil
+	j.degraded = false
 	return true
 }
 
@@ -676,22 +687,107 @@ func readVizProgress(path string) vizProgress {
 	return p
 }
 
+// resetVizProgress removes the progress sidecar file (if present) so a
+// freshly started rebuild does not momentarily report the PRIOR run's
+// pct:100/phase:"done" progress while the new process is still starting up
+// and has not yet written its own first progress update. readVizProgress
+// already tolerates a missing sidecar as zero-value progress (the "no
+// rebuild has started yet" case), so removal is equivalent to, and simpler
+// than, writing a fresh "starting" record: there is no second schema to keep
+// in sync with build-brain-viz.py's writer. A missing file (nothing to
+// remove: this is the very first rebuild) is not an error and is not logged.
+func resetVizProgress(vizOutputPath string) {
+	if err := os.Remove(vizProgressPath(vizOutputPath)); err != nil && !os.IsNotExist(err) {
+		slog.Warn("rebuild-viz: failed to reset progress sidecar for new run", "error", err)
+	}
+}
+
+// vizOutputTailMaxLen bounds how much of a failed rebuild's captured
+// stdout/stderr is echoed into the job-state error (and therefore into
+// /api/rebuild-viz/status's "error" field, and the UI). Uncapped, a runaway
+// script could turn the status endpoint into an unbounded log dump; capped,
+// enough of the tail survives to show WHY it failed (missing deps, DB down,
+// Ollama down) without that risk.
+const vizOutputTailMaxLen = 800
+
+// redactLikelyCredentialsInLine scans a single line of subprocess output for
+// a scheme://user:pass@host pattern (a DB DSN, or a URL with embedded
+// credentials) and redacts the credential portion, mirroring
+// internal/db.redactDSN. Ordinary Python tracebacks and print() output never
+// match this pattern, so it is a no-op for the overwhelming majority of
+// lines.
+func redactLikelyCredentialsInLine(line string) string {
+	schemeIdx := strings.Index(line, "://")
+	if schemeIdx == -1 {
+		return line
+	}
+	rest := line[schemeIdx+3:]
+	atIdx := strings.Index(rest, "@")
+	if atIdx == -1 {
+		return line
+	}
+	return line[:schemeIdx+3] + "***@" + rest[atIdx+1:]
+}
+
+// boundedOutputTail trims a failed rebuild's captured output to at most
+// vizOutputTailMaxLen bytes, keeping the END of the output (the traceback or
+// final error line is almost always last) rather than the start, and
+// redacting any line that looks like a DSN or URL with embedded credentials.
+func boundedOutputTail(out []byte) string {
+	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+	for i, line := range lines {
+		lines[i] = redactLikelyCredentialsInLine(line)
+	}
+	tail := strings.Join(lines, "\n")
+	if len(tail) <= vizOutputTailMaxLen {
+		return tail
+	}
+	return "...(truncated)...\n" + tail[len(tail)-vizOutputTailMaxLen:]
+}
+
+// classifyVizRebuildFailure turns a failed rebuild's process error, the
+// context's own error (nil unless the timeout fired), and the captured
+// output into the error surfaced via job.finish (and therefore
+// /api/rebuild-viz/status's "error" field).
+//
+// A context deadline exceeded is reported distinctly ("rebuild timed out
+// after ...") instead of the opaque "signal: killed" exec.CommandContext
+// leaves behind when it kills the process on timeout: the two failure modes
+// need different operator responses (a hung/unreachable Ollama vs. an
+// ordinary script error), and "signal: killed" alone gives no hint which one
+// happened.
+//
+// Any other failure is wrapped with a bounded tail of the captured output
+// (see boundedOutputTail), so an operator can see WHY it failed without
+// reading the server log.
+func classifyVizRebuildFailure(cmdErr error, ctxErr error, out []byte, timeout time.Duration) error {
+	if errors.Is(ctxErr, context.DeadlineExceeded) {
+		return fmt.Errorf("rebuild timed out after %s; the generator may be hung or Ollama unreachable", timeout)
+	}
+	tail := boundedOutputTail(out)
+	if tail == "" {
+		return fmt.Errorf("rebuild failed: %w", cmdErr)
+	}
+	return fmt.Errorf("rebuild failed: %w: %s", cmdErr, tail)
+}
+
 // runVizRebuild runs build-brain-viz.py to completion and records the
 // outcome on job. It owns the process end-to-end and is deliberately NOT
 // tied to any request context: the goroutine outlives the HTTP request that
 // triggered it (the handler returns 202 immediately), and a client
-// disconnecting must not kill a rebuild another poller is waiting on. The
-// 5-minute ceiling is a safety bound on Ollama being slow or unreachable,
-// not the expected duration (see plan.md).
+// disconnecting must not kill a rebuild another poller is waiting on.
+// cfg.VizRebuildTimeoutOrDefault() is a safety bound on Ollama being slow or
+// unreachable, not the expected duration (see plan.md).
 func runVizRebuild(cfg *config.Config, job *vizJobState) {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	timeout := cfg.VizRebuildTimeoutOrDefault()
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, cfg.VizPythonInterpreter(), cfg.VizScriptPath, "--output", cfg.VizOutputPath, "--progress-file", vizProgressPath(cfg.VizOutputPath))
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		slog.Error("rebuild-viz failed", "error", err, "output", string(out))
-		job.finish(fmt.Errorf("rebuild failed: %w", err), false)
+		job.finish(classifyVizRebuildFailure(err, ctx.Err(), out, timeout), false)
 		return
 	}
 
@@ -736,12 +832,31 @@ func apiRebuildViz(cfg *config.Config, job *vizJobState) http.HandlerFunc {
 			return
 		}
 
+		// Reset the progress sidecar synchronously, before returning 202, so a
+		// client that immediately polls /status after triggering never
+		// observes the PRIOR run's stale pct/phase (a race the goroutine
+		// below cannot close: it may not reach its own first progress write
+		// for some time after the process starts).
+		resetVizProgress(cfg.VizOutputPath)
+
 		go runVizRebuild(cfg, job)
 
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusAccepted)
 		_ = json.NewEncoder(w).Encode(map[string]any{"status": "started"})
 	}
+}
+
+// vizIsStale reports whether brain.json is older than ttl, given elapsed
+// (time.Since(mtime)). A zero or negative ttl disables the staleness check
+// entirely, regardless of elapsed. The comparison is strictly greater-than:
+// a file exactly ttl old is NOT stale. Extracted to a pure function because
+// the exact-equality boundary (elapsed == ttl) cannot be reproduced
+// deterministically through a real file mtime and time.Since call: by the
+// time the check runs, elapsed has always advanced past whatever offset a
+// test set up.
+func vizIsStale(ttl, elapsed time.Duration) bool {
+	return ttl > 0 && elapsed > ttl
 }
 
 // apiRebuildVizStatus reports the state of the brain-map rebuild job, merging
@@ -780,7 +895,7 @@ func apiRebuildVizStatus(cfg *config.Config, job *vizJobState) http.HandlerFunc 
 		stale := false
 		if info, statErr := os.Stat(cfg.VizOutputPath); statErr == nil {
 			exists = true
-			stale = cfg.VizTTL > 0 && time.Since(info.ModTime()) > cfg.VizTTL
+			stale = vizIsStale(cfg.VizTTL, time.Since(info.ModTime()))
 		}
 
 		jsonResponse(w, map[string]any{
