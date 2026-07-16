@@ -1355,14 +1355,35 @@ async function runBlockingBuild(alreadyRunning) {
   try {
     if (!alreadyRunning) await triggerVizRebuild();
   } catch (err) {
-    showBlockingError(err.message);
-    endVizSession();
+    try {
+      showBlockingError(err.message);
+    } finally {
+      endVizSession();
+    }
     return;
   }
+  // endVizSession() must not run until finishVizLoad() (and its /brain.json
+  // load) has settled: releasing the session guard any earlier lets a click
+  // landing in that gap start a second, concurrent loadData() against the
+  // same shared globals. The finally also guarantees release on a throw, so
+  // a failing showBlockingError/showRefreshError call can never wedge
+  // vizSessionActive true and leave rebuildBtn stuck disabled.
   pollVizStatus({
     onProgress: setVizProgress,
-    onDone: async (status) => { endVizSession(); await finishVizLoad(status, false); },
-    onError: (msg) => { showBlockingError(msg); endVizSession(); },
+    onDone: async (status) => {
+      try {
+        await finishVizLoad(status, false);
+      } finally {
+        endVizSession();
+      }
+    },
+    onError: (msg) => {
+      try {
+        showBlockingError(msg);
+      } finally {
+        endVizSession();
+      }
+    },
   });
 }
 
@@ -1377,18 +1398,33 @@ async function runBackgroundRefresh(alreadyRunning) {
   try {
     if (!alreadyRunning) await triggerVizRebuild();
   } catch (err) {
-    showRefreshError(err.message);
-    endVizSession();
+    try {
+      showRefreshError(err.message);
+    } finally {
+      endVizSession();
+    }
     return;
   }
+  // See runBlockingBuild's comment above pollVizStatus: endVizSession() is
+  // deferred to after finishVizLoad() settles, in a finally, for the same
+  // concurrent-load and wedge reasons.
   pollVizStatus({
     onProgress: setVizProgress,
     onDone: async (status) => {
-      hideRefreshIndicator();
-      endVizSession();
-      await finishVizLoad(status, true);
+      try {
+        hideRefreshIndicator();
+        await finishVizLoad(status, true);
+      } finally {
+        endVizSession();
+      }
     },
-    onError: (msg) => { showRefreshError(msg); endVizSession(); },
+    onError: (msg) => {
+      try {
+        showRefreshError(msg);
+      } finally {
+        endVizSession();
+      }
+    },
   });
 }
 
@@ -1443,18 +1479,33 @@ rebuildBtn.addEventListener('click', async function() {
   try {
     await triggerVizRebuild();
   } catch (err) {
-    showRefreshError(err.message);
-    endVizSession();
+    try {
+      showRefreshError(err.message);
+    } finally {
+      endVizSession();
+    }
     return;
   }
+  // See runBlockingBuild's comment above pollVizStatus: endVizSession() is
+  // deferred to after finishVizLoad() settles, in a finally, for the same
+  // concurrent-load and wedge reasons.
   pollVizStatus({
     onProgress: setVizProgress,
     onDone: async (status) => {
-      hideRefreshIndicator();
-      endVizSession();
-      await finishVizLoad(status, false);
+      try {
+        hideRefreshIndicator();
+        await finishVizLoad(status, false);
+      } finally {
+        endVizSession();
+      }
     },
-    onError: (msg) => { showRefreshError(msg); endVizSession(); },
+    onError: (msg) => {
+      try {
+        showRefreshError(msg);
+      } finally {
+        endVizSession();
+      }
+    },
   });
 });
 
