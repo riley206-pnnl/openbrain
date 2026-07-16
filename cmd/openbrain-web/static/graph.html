@@ -1026,15 +1026,25 @@ const timelineLabel  = document.getElementById('timeline-label');
 const timelineWrap   = document.getElementById('timeline-wrap');
 const trackFill      = document.getElementById('timeline-track-fill');
 
-function initTimeline() {
+// seedFromCurrentWindow: when true, initialize the slider handles from the
+// already-set dateMin/dateMax (a preserved background-refresh window)
+// instead of resetting to the full-range default. Callers must set
+// dateMin/dateMax before calling with this flag.
+function initTimeline(seedFromCurrentWindow) {
   if (dataDateMin === dataDateMax) {
-    // Only one day of data — hide the control; nothing useful to scrub.
+    // Only one day of data, hide the control: nothing useful to scrub.
     timelineWrap.style.display = 'none';
     return;
   }
   timelineWrap.style.display = '';
-  rangeFrom.value = '0';
-  rangeTo.value   = '1000';
+  if (seedFromCurrentWindow && dataDateMax > dataDateMin) {
+    const span = dataDateMax - dataDateMin;
+    rangeFrom.value = String(Math.round(((dateMin - dataDateMin) / span) * 1000));
+    rangeTo.value   = String(Math.round(((dateMax - dataDateMin) / span) * 1000));
+  } else {
+    rangeFrom.value = '0';
+    rangeTo.value   = '1000';
+  }
   updateTimelineLabel();
   updateTrackFill();
 }
@@ -1118,9 +1128,26 @@ const refreshIndicatorFill  = document.getElementById('refresh-indicator-fill');
 const refreshIndicatorLabel = document.getElementById('refresh-indicator-label');
 const refreshDismissBtn     = document.getElementById('refresh-dismiss-btn');
 const rebuildBtn            = document.getElementById('btn-rebuild');
+const vizSrSummary          = document.getElementById('sr-summary');
 
 const VIZ_POLL_INTERVAL_MS = 1000;
 const VIZ_POLL_TIMEOUT_MS  = 5 * 60 * 1000; // matches the backend's 5-minute build ceiling
+
+// True while ANY viz poll session (blocking build, background refresh, or
+// manual rebuild) is in flight. See beginVizSession/endVizSession below.
+let vizSessionActive = false;
+
+// Announces a terminal viz-build transition (started / failed) to screen
+// readers via the existing polite live region. Per-tick percentage updates
+// are deliberately NOT announced here: that would fire the live region
+// roughly once a second, which is disruptive rather than helpful. "Done" is
+// announced implicitly: finishVizLoad()'s loadData() call runs buildLegend(),
+// which overwrites this same region with the loaded thought/region counts,
+// so a screen-reader user hears the concrete result rather than a bare
+// "done".
+function announceViz(msg) {
+  if (vizSrSummary) vizSrSummary.textContent = msg;
+}
 
 function tokenQS() {
   const token = new URLSearchParams(location.search).get('token') || '';
@@ -1173,6 +1200,7 @@ function showBlockingProgress() {
   vizProgressFill.style.width = '0%';
   vizProgressLabel.textContent = 'Starting…';
   overlay.classList.remove('hidden');
+  announceViz('Building your brain map for the first time. This may take a few minutes.');
 }
 
 // Never leaves the bar stuck below 100: the progress bar is hidden and the
@@ -1184,6 +1212,7 @@ function showBlockingError(message) {
     'Failed to build brain map: ' + esc(message) + '<br>' +
     'Click <strong>Rebuild map</strong> above to retry.';
   overlay.classList.remove('hidden');
+  announceViz('Brain map build failed: ' + message);
 }
 
 function showRefreshIndicator() {
@@ -1191,6 +1220,7 @@ function showRefreshIndicator() {
   refreshDismissBtn.classList.add('hidden');
   refreshIndicatorFill.style.width = '0%';
   refreshIndicatorLabel.textContent = 'Refreshing map…';
+  announceViz('Refreshing brain map in the background.');
 }
 
 function hideRefreshIndicator() {
@@ -1202,26 +1232,47 @@ function showRefreshError(message) {
   refreshIndicatorLabel.innerHTML =
     'Refresh failed: ' + esc(message) + '<br>Click Rebuild map to retry.';
   refreshDismissBtn.classList.remove('hidden');
+  announceViz('Brain map refresh failed: ' + message);
 }
 
 refreshDismissBtn.addEventListener('click', hideRefreshIndicator);
 
 let vizPollHandle = null;
 
-// Stops any in-flight poll timer. At most one poll loop runs at a time:
-// pollVizStatus calls this before scheduling its own tick, so a manual
-// rebuild click and an in-progress background/blocking poll never race.
+// Monotonic token identifying the current poll session. stopVizPoll() can
+// only cancel a timer that hasn't fired yet: it cannot cancel a fetch that
+// is already in flight. So every tick captures the generation it started
+// with and re-checks it after each await; a tick from a superseded session
+// drops silently (no callback, no reschedule) instead of firing its
+// onProgress/onDone/onError against UI state a newer session now owns.
+let vizPollGen = 0;
+
+// Stops any pending (not-yet-fired) poll timer.
 function stopVizPoll() {
   if (vizPollHandle) { clearTimeout(vizPollHandle); vizPollHandle = null; }
+}
+
+// Wraps a poll callback so a throwing (or rejecting, since onDone is async)
+// onProgress/onDone/onError becomes a visible console error instead of a
+// silent unhandled rejection that leaves the UI stuck (progress bar frozen,
+// rebuildBtn stuck disabled).
+async function safeVizCallback(fn, arg) {
+  try {
+    await fn(arg);
+  } catch (err) {
+    console.error('brain-map: poll callback threw:', err);
+  }
 }
 
 // Polls GET /api/rebuild-viz/status on a fixed interval until the job
 // reaches done or error, or the poll exceeds VIZ_POLL_TIMEOUT_MS (bounded to
 // the backend's 5-minute build ceiling, so a hung/unreachable build resolves
 // to a clear error instead of an indefinite spinner). onProgress fires on
-// every status; onDone/onError fire exactly once, terminally.
+// every status; onDone/onError fire exactly once, terminally, unless this
+// session is superseded by a newer one, in which case neither fires again.
 function pollVizStatus({ onProgress, onDone, onError }) {
   stopVizPoll();
+  const gen = ++vizPollGen;
   const deadline = Date.now() + VIZ_POLL_TIMEOUT_MS;
 
   const tick = async () => {
@@ -1229,64 +1280,115 @@ function pollVizStatus({ onProgress, onDone, onError }) {
     try {
       status = await fetchVizStatus();
     } catch (err) {
-      onError(err.message);
+      if (gen !== vizPollGen) return; // superseded while the fetch was in flight
+      await safeVizCallback(onError, err.message);
       return;
     }
-    onProgress(status);
+    if (gen !== vizPollGen) return; // superseded while the fetch was in flight
 
-    if (status.state === 'done') { onDone(status); return; }
-    if (status.state === 'error') { onError(status.error || 'rebuild failed'); return; }
-    if (Date.now() > deadline) { onError('timed out waiting for the brain map to build'); return; }
+    await safeVizCallback(onProgress, status);
+    if (gen !== vizPollGen) return; // onProgress may itself have started a newer session
 
+    if (status.state === 'done') { await safeVizCallback(onDone, status); return; }
+    if (status.state === 'error') { await safeVizCallback(onError, status.error || 'rebuild failed'); return; }
+    if (Date.now() > deadline) { await safeVizCallback(onError, 'timed out waiting for the brain map to build'); return; }
+
+    if (gen !== vizPollGen) return;
     vizPollHandle = setTimeout(tick, VIZ_POLL_INTERVAL_MS);
   };
 
   tick();
 }
 
-// Degraded builds are still valid (heuristic labels only, Ollama was
-// unreachable during the run) — per the plan, render normally and just note
-// it, never treat degraded as an error.
-function noteDegraded() {
-  const el = document.getElementById('header-stats');
-  if (el) el.textContent += ' · labels heuristic (Ollama unreachable during build)';
+// Single-flight guard shared by EVERY viz trigger entry point: the page-load
+// auto build, the page-load auto background refresh, and the manual
+// "Rebuild map" button. At most one poll session (and one outstanding
+// rebuild POST) is ever active. A second trigger while one is in flight is a
+// no-op here: the active session already covers it, and disabling
+// rebuildBtn for the duration means the button itself can't fire a second
+// click while an auto-triggered session owns the button. Returns false when
+// a session is already active so the caller can bail without starting a
+// second one.
+function beginVizSession(busyText) {
+  if (vizSessionActive) return false;
+  vizSessionActive = true;
+  rebuildBtn.disabled = true;
+  if (busyText) rebuildBtn.textContent = busyText;
+  return true;
 }
 
-async function finishVizLoad(status) {
-  await loadData();
+function endVizSession() {
+  vizSessionActive = false;
+  rebuildBtn.disabled = false;
+  rebuildBtn.textContent = 'Rebuild map';
+}
+
+// Degraded builds are still valid (heuristic labels only, Ollama was
+// unreachable during the run), per the plan: render normally and just note
+// it, never treat degraded as an error. loadData() clears the
+// degradedNoted marker on every load, so this stays a once-per-load append
+// even though noteDegraded() can be called for both the initial status
+// check and again after a background-refresh swap completes.
+function noteDegraded() {
+  const el = document.getElementById('header-stats');
+  if (!el || el.dataset.degradedNoted === '1') return;
+  el.textContent += ' · labels heuristic (Ollama unreachable during build)';
+  el.dataset.degradedNoted = '1';
+}
+
+// preserveState: true for a silent background refresh, where the user's
+// active type filter and timeline window should survive the data swap. See
+// loadData() for the reset-vs-preserve rules this flag drives.
+async function finishVizLoad(status, preserveState) {
+  await loadData(preserveState);
   if (status.degraded) noteDegraded();
 }
 
 // Blocking path: brain.json is missing, nothing usable to show yet.
+// This is the very first load for this browser session (DATA is still
+// null), so the fresh-default filter/timeline state finishVizLoad's plain
+// loadData(false) produces is correct: there is no prior user state to
+// preserve.
 async function runBlockingBuild(alreadyRunning) {
+  if (!beginVizSession(false)) return; // another session already owns this
   showBlockingProgress();
   try {
     if (!alreadyRunning) await triggerVizRebuild();
   } catch (err) {
     showBlockingError(err.message);
+    endVizSession();
     return;
   }
   pollVizStatus({
     onProgress: setVizProgress,
-    onDone: finishVizLoad,
-    onError: showBlockingError,
+    onDone: async (status) => { endVizSession(); await finishVizLoad(status, false); },
+    onError: (msg) => { showBlockingError(msg); endVizSession(); },
   });
 }
 
 // Background path: a usable (if stale) map is already rendered by the
-// caller before this runs. Never blocks the current view.
+// caller before this runs. Never blocks the current view. Silent: the user
+// didn't ask for this, so it must not clobber their active type filter or
+// timeline window: finishVizLoad(status, true) preserves and reapplies
+// them across the data swap.
 async function runBackgroundRefresh(alreadyRunning) {
+  if (!beginVizSession(false)) return; // another session already owns this
   showRefreshIndicator();
   try {
     if (!alreadyRunning) await triggerVizRebuild();
   } catch (err) {
     showRefreshError(err.message);
+    endVizSession();
     return;
   }
   pollVizStatus({
     onProgress: setVizProgress,
-    onDone: async (status) => { hideRefreshIndicator(); await finishVizLoad(status); },
-    onError: showRefreshError,
+    onDone: async (status) => {
+      hideRefreshIndicator();
+      endVizSession();
+      await finishVizLoad(status, true);
+    },
+    onError: (msg) => { showRefreshError(msg); endVizSession(); },
   });
 }
 
@@ -1296,8 +1398,10 @@ async function checkVizStatusAndLoad() {
   try {
     status = await fetchVizStatus();
   } catch (err) {
-    // Status endpoint itself unreachable — fall back to a plain data load so
-    // a status-endpoint hiccup doesn't block an otherwise-servable map.
+    // Status endpoint itself unreachable. Log it (this used to be swallowed
+    // entirely) and fall back to a plain data load so a status-endpoint
+    // hiccup doesn't block an otherwise-servable map.
+    console.error('brain-map: status check failed, falling back to a plain data load:', err);
     await loadData();
     return;
   }
@@ -1305,11 +1409,21 @@ async function checkVizStatusAndLoad() {
   const running = status.state === 'running';
 
   if (!status.exists) {
+    // The map has never been built. If the *last* build attempt already
+    // failed (possibly after running the full 5-minute ceiling), don't
+    // silently re-trigger another one on every page load: that's a reload
+    // storm against a build that just failed. Show the last error and let
+    // the user retry explicitly via the always-visible "Rebuild map" button.
+    if (status.state === 'error') {
+      showBlockingError(status.error || 'The last brain map build failed.');
+      return;
+    }
     await runBlockingBuild(running);
     return;
   }
 
   await loadData();
+  if (status.degraded) noteDegraded();
 
   if (running || status.stale) {
     await runBackgroundRefresh(running);
@@ -1318,32 +1432,29 @@ async function checkVizStatusAndLoad() {
 
 // Manual "Rebuild map" button — rides the same async trigger + poll + bar
 // path as the auto-triggers (the backend endpoint is async now, so the old
-// synchronous-200 await no longer matches its contract).
+// synchronous-200 await no longer matches its contract). Goes through the
+// same beginVizSession/endVizSession single-flight guard as the auto paths,
+// so a click that somehow lands while an auto-triggered session is already
+// running (rebuildBtn is disabled for that session's duration, so this is
+// belt-and-suspenders) joins rather than spawning a second poll loop.
 rebuildBtn.addEventListener('click', async function() {
-  rebuildBtn.disabled = true;
-  rebuildBtn.textContent = 'Rebuilding…';
+  if (!beginVizSession('Rebuilding…')) return;
   showRefreshIndicator();
   try {
     await triggerVizRebuild();
   } catch (err) {
     showRefreshError(err.message);
-    rebuildBtn.disabled = false;
-    rebuildBtn.textContent = 'Rebuild map';
+    endVizSession();
     return;
   }
   pollVizStatus({
     onProgress: setVizProgress,
     onDone: async (status) => {
       hideRefreshIndicator();
-      await finishVizLoad(status);
-      rebuildBtn.disabled = false;
-      rebuildBtn.textContent = 'Rebuild map';
+      endVizSession();
+      await finishVizLoad(status, false);
     },
-    onError: (msg) => {
-      showRefreshError(msg);
-      rebuildBtn.disabled = false;
-      rebuildBtn.textContent = 'Rebuild map';
-    },
+    onError: (msg) => { showRefreshError(msg); endVizSession(); },
   });
 });
 
@@ -1387,7 +1498,9 @@ function buildTypePills() {
   bar.innerHTML = '';
   for (const tp of DATA.meta.thought_types) {
     const btn = document.createElement('button');
-    btn.className = 'type-pill active';
+    // Reflect the current activeTypes (which may be a preserved subset from
+    // a background refresh, not "all") rather than always marking active.
+    btn.className = 'type-pill' + (activeTypes.has(tp) ? ' active' : '');
     btn.textContent = (TYPE_ICONS[tp] || '') + ' ' + tp;
     btn.dataset.type = tp;
     btn.addEventListener('click', () => {
@@ -1631,7 +1744,31 @@ function showState(msg) {
 function hideState() { overlay.classList.add('hidden'); }
 
 // ── load data ─────────────────────────────────────────────────────────────────
-async function loadData() {
+// preserveState: true only for a silent background refresh (see
+// runBackgroundRefresh). When true, the caller's current activeTypes and
+// timeline window survive the data swap instead of resetting to "all
+// types, full range": a background refresh is invisible to the user, so it
+// must not silently discard filters they set. hiddenClusters is ALWAYS
+// reset regardless of preserveState: HDBSCAN renumbers cluster IDs on every
+// rebuild, so a previously-hidden cluster ID can now refer to a completely
+// different region, and carrying it forward would mis-hide that region
+// instead of the one the user actually hid.
+async function loadData(preserveState) {
+  // Capture the pre-swap user state before it's overwritten below. Captured
+  // as a 0..1 fraction of the OLD date range so it can be reapplied against
+  // the NEW range's extent, which may differ after a rebuild.
+  let savedActiveTypes = null;
+  let savedFromFrac = null, savedToFrac = null;
+  if (preserveState && DATA) {
+    savedActiveTypes = new Set(activeTypes);
+    if (dataDateMin !== null && dataDateMax !== null && dataDateMax > dataDateMin) {
+      const span = dataDateMax - dataDateMin;
+      const clamp01 = v => Math.min(1, Math.max(0, v));
+      savedFromFrac = clamp01((dateMin - dataDateMin) / span);
+      savedToFrac   = clamp01((dateMax - dataDateMin) / span);
+    }
+  }
+
   try {
     const res = await fetch('/brain.json' + location.search);
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -1647,6 +1784,7 @@ async function loadData() {
     }
 
     activeTypes = new Set(DATA.meta.thought_types);
+    hiddenClusters = new Set(); // see preserveState doc comment above
 
     // Cache parsed timestamps on each node once so visible() stays cheap.
     DATA.nodes.forEach(n => { n._t = parseTS(n.created_at); });
@@ -1658,18 +1796,38 @@ async function loadData() {
     } else {
       dataDateMin = dataDateMax = Date.now();
     }
-    // Reset the active window to the full extent on (re)load.
+    // Default: reset the active window to the full extent on (re)load.
     dateMin = dataDateMin;
     dateMax = dataDateMax;
-    initTimeline();
+
+    let restoredWindow = false;
+    if (preserveState) {
+      if (savedActiveTypes) {
+        // Keep only types that still exist in the new data. If the
+        // intersection is empty (e.g. every previously-active type vanished
+        // from the data), fall back to "all types" rather than leaving the
+        // map with nothing visible.
+        const stillValid = new Set([...savedActiveTypes].filter(t => activeTypes.has(t)));
+        if (stillValid.size > 0) activeTypes = stillValid;
+      }
+      if (savedFromFrac !== null && dataDateMax > dataDateMin) {
+        const span = dataDateMax - dataDateMin;
+        dateMin = dataDateMin + savedFromFrac * span;
+        dateMax = dataDateMin + savedToFrac * span;
+        restoredWindow = true;
+      }
+    }
+    initTimeline(restoredWindow);
 
     hideState();
     buildLegend();
     buildTypePills();
 
     const m = DATA.meta;
-    document.getElementById('header-stats').textContent =
+    const headerStats = document.getElementById('header-stats');
+    headerStats.textContent =
       `${m.n_thoughts} thoughts · ${m.n_clusters} regions · ${m.n_edges} connections`;
+    delete headerStats.dataset.degradedNoted; // allow noteDegraded() to re-fire for this load
 
     resize();
   } catch (err) {
