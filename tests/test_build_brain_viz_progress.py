@@ -200,6 +200,54 @@ class TestLabelClustersProgressBand:
         pcts = [e["pct"] for e in seen]
         assert pcts == sorted(pcts)
 
+    def test_empty_labels_returns_empty_result_without_raising(
+        self, tmp_path: Path
+    ) -> None:
+        """The real HDBSCAN-found-no-clusters case: all points noise, or fewer
+        thoughts than min_cluster_size, so `labels` (and `thoughts`) are empty.
+
+        Must not raise (no divide-by-zero from clusters_total == 0) and must
+        emit only the single pre-loop "labeling" write: no per-cluster writes,
+        since the loop body never runs.
+        """
+        import numpy as np
+
+        progress_path = tmp_path / "status.json"
+
+        seen: list[dict] = []
+        orig_write = viz._write_progress
+
+        def _spy(path, phase, pct, clusters_done=0, clusters_total=0):  # type: ignore[no-untyped-def]
+            orig_write(path, phase, pct, clusters_done, clusters_total)
+            if path is not None:
+                seen.append(
+                    {
+                        "phase": phase,
+                        "pct": pct,
+                        "clusters_done": clusters_done,
+                        "clusters_total": clusters_total,
+                    }
+                )
+
+        viz._write_progress = _spy  # type: ignore[assignment]
+        try:
+            clusters_out, llm_attempts, llm_fallbacks = viz.label_clusters(
+                [],
+                np.empty((0, 2)),
+                [],
+                cfg={},
+                ollama_model="unused",
+                no_llm=True,
+                progress_path=progress_path,
+            )
+        finally:
+            viz._write_progress = orig_write  # type: ignore[assignment]
+
+        assert (clusters_out, llm_attempts, llm_fallbacks) == ([], 0, 0)
+        assert seen == [
+            {"phase": "labeling", "pct": 50, "clusters_done": 0, "clusters_total": 0}
+        ]
+
     def test_no_progress_path_writes_nothing(self, tmp_path: Path) -> None:
         thoughts, coords, labels = self._thoughts_and_labels(n_clusters=2)
         before = list(tmp_path.iterdir())

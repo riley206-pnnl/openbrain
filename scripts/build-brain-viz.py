@@ -327,7 +327,7 @@ def _write_progress(
     """
     if progress_path is None:
         return
-    payload = {
+    payload: dict[str, str | int | float] = {
         "pct": pct,
         "phase": phase,
         "clusters_done": clusters_done,
@@ -479,7 +479,10 @@ def label_clusters(
         })
 
         clusters_done += 1
-        pct = 50 + int(45 * clusters_done / clusters_total) if clusters_total else 95
+        # clusters_total is len(cluster_ids); this loop only runs when
+        # cluster_ids is non-empty (we're iterating over it), so
+        # clusters_total is always >= 1 here and the division is safe.
+        pct = 50 + int(45 * clusters_done / clusters_total)
         _write_progress(progress_path, "labeling", pct, clusters_done, clusters_total)
 
     return clusters_out, llm_attempts, llm_fallbacks
