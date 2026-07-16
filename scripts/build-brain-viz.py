@@ -39,6 +39,7 @@ Requirements (install in a venv):
 import argparse
 import json
 import os
+import re
 import sys
 import tempfile
 import time
@@ -263,6 +264,27 @@ def heuristic_label(cluster_thoughts: list[dict]) -> str:
     return dominant.replace("_", " ").title()
 
 
+def _parse_llm_label(raw: str) -> str:
+    """Extract a usable label from a (possibly chatty) LLM response.
+
+    Ollama models vary in how strictly they follow "return only the label":
+    some return a bulleted or numbered list of candidates instead of a
+    single line. Take the first non-empty line, strip common list markers
+    (bullets, numbering, quotes, backticks), and return it trimmed. Returns
+    an empty string when no usable line is found, so the caller's length
+    check rejects it the same as an empty response would.
+    """
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        line = re.sub(r"^[\-\*•\d]+[.\)]?\s*", "", line)
+        line = line.strip().strip("\"'`").strip()
+        if line:
+            return line
+    return ""
+
+
 def llm_label(cluster_thoughts: list[dict], cfg: dict, model: str) -> str | None:
     sample = sorted(cluster_thoughts,
                     key=lambda t: (len(t["summary"]) > 0, len(t["content"])),
@@ -291,8 +313,8 @@ def llm_label(cluster_thoughts: list[dict], cfg: dict, model: str) -> str | None
             timeout=30,
         )
         resp.raise_for_status()
-        label = resp.json().get("response", "").strip().strip('"\'').strip()
-        if 2 <= len(label) <= 60 and "\n" not in label:
+        label = _parse_llm_label(resp.json().get("response", ""))
+        if 2 <= len(label) <= 60:
             return label
     except Exception as exc:
         print(f"    [warn] LLM call failed: {exc}")
@@ -469,19 +491,30 @@ def load_config(script_dir: Path, repo_root: Path) -> dict:
 def resolve_ollama_model(cfg: dict) -> str:
     """Return the Ollama model for cluster labeling.
 
-    Checks OPENBRAIN_EXTRACT_MODEL_FAST, then OPENBRAIN_EXTRACT_MODEL, then
+    Checks OPENBRAIN_EXTRACT_MODEL, then OPENBRAIN_EXTRACT_MODEL_FAST, then
     OPENBRAIN_CHAT_MODEL (in that order). Exits with an error if none is set;
     pass --no-llm to skip cluster labeling without needing any model var.
+
+    OPENBRAIN_EXTRACT_MODEL is checked first, ahead of the FAST variant,
+    because labeling quality was measured directly on this brain's clusters:
+    the fast model (llama3.2:1b) reliably ignores the "return only the
+    label" instruction and returns a rambling multi-line list of candidates
+    or a meta preamble ("Here are the labels..."), producing a usable but
+    semantically empty label even after robust first-line parsing.
+    OPENBRAIN_EXTRACT_MODEL (gemma3 on this brain) consistently returns a
+    single descriptive phrase. Labeling is a bounded, one-call-per-cluster
+    cost (dozens of calls, not per-thought), so the extra latency of the
+    larger model is worth the label quality.
     """
     model = (
-        cfg.get("OPENBRAIN_EXTRACT_MODEL_FAST") or
         cfg.get("OPENBRAIN_EXTRACT_MODEL") or
+        cfg.get("OPENBRAIN_EXTRACT_MODEL_FAST") or
         cfg.get("OPENBRAIN_CHAT_MODEL")
     )
     if not model:
         sys.exit(
-            "error: set one of OPENBRAIN_EXTRACT_MODEL_FAST, "
-            "OPENBRAIN_EXTRACT_MODEL, or OPENBRAIN_CHAT_MODEL in .env "
+            "error: set one of OPENBRAIN_EXTRACT_MODEL, "
+            "OPENBRAIN_EXTRACT_MODEL_FAST, or OPENBRAIN_CHAT_MODEL in .env "
             "(or pass --no-llm to skip cluster labeling)"
         )
     return model
