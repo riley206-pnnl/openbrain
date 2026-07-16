@@ -6,6 +6,13 @@ Reads all thoughts + embeddings from Postgres, projects to 2D via UMAP,
 clusters with HDBSCAN, generates LLM cluster labels via Ollama, and emits
 brain.json into cmd/openbrain-web/static/ so the Go web server can serve it.
 
+Clustering runs in a moderate-dimensional UMAP space (see --cluster-dim),
+NOT the raw 768d embeddings and NOT the 2D layout projection. HDBSCAN's
+density estimate collapses in 768d (distance concentration), and the 2D
+layout throws away almost all topical structure; a 10-30d UMAP space keeps
+the structure while giving HDBSCAN a space where density is meaningful. The
+2D projection is computed separately and used only for x/y node layout.
+
 Usage:
     python3 scripts/build-brain-viz.py
 
@@ -14,7 +21,11 @@ Options:
     --standalone FILE   Also write a self-contained HTML file (for offline use)
     --kmeans K          Use k-means with K clusters instead of HDBSCAN
     --no-llm            Skip LLM labeling; use heuristic labels only
-    --min-cluster N     HDBSCAN min_cluster_size (default: 8)
+    --min-cluster N     HDBSCAN min_cluster_size (default: 5)
+    --min-samples N     HDBSCAN min_samples; lower = fewer noise points
+                        (default: 1)
+    --cluster-dim N     UMAP dimensionality of the clustering space
+                        (default: 15; use 0 to cluster raw embeddings)
     --max-edges N       Max similarity edges (default: 2000)
     --sim-thresh F      Min cosine similarity for an edge (default: 0.55)
     --progress-file PATH  Write a progress status JSON to PATH as generation
@@ -127,16 +138,67 @@ def project_2d(embeddings: np.ndarray, use_umap: bool = True) -> np.ndarray:
     return tsne.fit_transform(embeddings)
 
 
-def cluster_hdbscan(embeddings: np.ndarray, min_cluster_size: int = 8) -> np.ndarray | None:
+def _l2_normalize(embeddings: np.ndarray) -> np.ndarray:
+    """Return row-wise L2-normalized copy so euclidean distance tracks cosine."""
+    norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
+    norms = np.where(norms == 0, 1, norms)
+    return embeddings / norms
+
+
+def cluster_space(embeddings: np.ndarray, n_components: int = 15) -> np.ndarray:
+    """Reduce embeddings to the space HDBSCAN clusters in.
+
+    Clustering the raw 768d embeddings collapses HDBSCAN to a couple of
+    dense pockets because pairwise distances concentrate in high dimensions
+    (curse of dimensionality); clustering the 2D layout projection discards
+    almost all topical structure. A moderate UMAP space (default 15d) keeps
+    the topical structure while giving HDBSCAN meaningful density contrast.
+
+    n_components == 0, or UMAP being unavailable, falls back to the raw
+    L2-normalized embeddings so the pipeline still runs (degraded).
+    """
+    N = len(embeddings)
+    if n_components <= 0:
+        print("  Clustering space: raw L2-normalized embeddings (--cluster-dim 0)")
+        return _l2_normalize(embeddings)
+
+    UMAP = _import_umap()
+    if UMAP is None:
+        print("  [warn] umap-learn unavailable; clustering raw L2-normalized embeddings")
+        return _l2_normalize(embeddings)
+
+    # n_neighbors and n_components must be < N; clamp for small brains.
+    n_neighbors = min(15, N - 1)
+    n_components = min(n_components, N - 1)
+    print(f"  Reducing to {n_components}d clustering space "
+          f"(UMAP cosine, n_neighbors={n_neighbors}, min_dist=0.0)…")
+    # min_dist=0.0 packs points as tightly as the manifold allows, which is
+    # the recommended setting when the projection feeds a density clusterer.
+    reducer = UMAP(n_components=n_components, metric="cosine",
+                   n_neighbors=n_neighbors, min_dist=0.0,
+                   random_state=42, verbose=False)
+    return reducer.fit_transform(embeddings)
+
+
+def cluster_hdbscan(
+    space: np.ndarray,
+    min_cluster_size: int = 5,
+    min_samples: int = 1,
+) -> np.ndarray | None:
+    """Cluster the (already reduced) *space* with HDBSCAN.
+
+    *space* is expected to be the moderate-dimensional clustering space from
+    cluster_space(), not the raw embeddings; euclidean distance is applied
+    directly with no further normalization.
+    """
     HDBSCAN = _import_hdbscan()
     if HDBSCAN is None:
         return None
-    print(f"  Running HDBSCAN (min_cluster_size={min_cluster_size})…")
-    clusterer = HDBSCAN(min_cluster_size=min_cluster_size, metric="euclidean",
-                        cluster_selection_epsilon=0.0)
-    norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
-    norms = np.where(norms == 0, 1, norms)
-    labels = clusterer.fit_predict(embeddings / norms)
+    print(f"  Running HDBSCAN (min_cluster_size={min_cluster_size}, "
+          f"min_samples={min_samples})…")
+    clusterer = HDBSCAN(min_cluster_size=min_cluster_size, min_samples=min_samples,
+                        metric="euclidean", cluster_selection_epsilon=0.0)
+    labels = clusterer.fit_predict(space)
     n_clusters = len(set(labels)) - (1 if -1 in labels else 0)
     print(f"  HDBSCAN: {n_clusters} clusters, {(labels == -1).sum()} noise points")
     return labels
@@ -362,8 +424,13 @@ def parse_args(default_output: Path) -> argparse.Namespace:
                         help="Use k-means with K clusters instead of HDBSCAN")
     parser.add_argument("--no-llm", action="store_true",
                         help="Skip LLM labeling; use heuristic labels only")
-    parser.add_argument("--min-cluster", type=int, default=8, metavar="N",
-                        help="HDBSCAN min_cluster_size (default: 8)")
+    parser.add_argument("--min-cluster", type=int, default=5, metavar="N",
+                        help="HDBSCAN min_cluster_size (default: 5)")
+    parser.add_argument("--min-samples", type=int, default=1, metavar="N",
+                        help="HDBSCAN min_samples; lower = fewer noise points (default: 1)")
+    parser.add_argument("--cluster-dim", type=int, default=15, metavar="N",
+                        help="UMAP dimensionality of the clustering space "
+                             "(default: 15; use 0 to cluster raw embeddings)")
     parser.add_argument("--max-edges", type=int, default=2000, metavar="N",
                         help="Max similarity edges (default: 2000)")
     parser.add_argument("--sim-thresh", type=float, default=0.55, metavar="F",
@@ -572,7 +639,12 @@ def run_pipeline(args: argparse.Namespace) -> None:
     if args.kmeans > 0:
         labels = cluster_kmeans(embeddings_arr, k=args.kmeans)
     else:
-        labels = cluster_hdbscan(embeddings_arr, min_cluster_size=args.min_cluster)
+        # Cluster in a moderate-dim UMAP space, not the raw 768d embeddings
+        # (distance concentration collapses HDBSCAN) and not the 2D layout
+        # projection (discards topical structure). See cluster_space().
+        clustering_input = cluster_space(embeddings_arr, n_components=args.cluster_dim)
+        labels = cluster_hdbscan(clustering_input, min_cluster_size=args.min_cluster,
+                                 min_samples=args.min_samples)
         if labels is None:
             print("  [fallback] using k-means k=8")
             labels = cluster_kmeans(embeddings_arr, k=8)
