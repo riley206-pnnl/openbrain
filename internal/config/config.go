@@ -4,10 +4,12 @@ package config
 import (
 	"fmt"
 	"log/slog"
+	"os"
 	"regexp"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/caarlos0/env/v11"
 	"github.com/joho/godotenv"
@@ -125,6 +127,24 @@ type Config struct {
 	// Brain visualization
 	VizScriptPath string `env:"OPENBRAIN_VIZ_SCRIPT_PATH"` // path to build-brain-viz.py; empty disables the rebuild endpoint
 	VizOutputPath string `env:"OPENBRAIN_VIZ_OUTPUT_PATH"` // path where brain.json is written and served from disk
+	// VizPythonPath is the Python interpreter used to run VizScriptPath.
+	// Defaults to "python3" resolved off the service's own PATH, which has
+	// none of the viz pipeline's dependencies (numpy, umap, hdbscan, psycopg).
+	// Point this at a dedicated venv's python binary once one is provisioned.
+	VizPythonPath string `env:"OPENBRAIN_VIZ_PYTHON" envDefault:"python3"`
+	// VizTTL is the max age of brain.json before /api/rebuild-viz/status
+	// reports it stale. Parsed by hand in Load (env:"-" here), not through
+	// the struct tag: see parseVizTTL for why an explicitly empty env var
+	// must be distinguishable from unset.
+	VizTTL time.Duration `env:"-"`
+	// VizRebuildTimeout is the safety-bound ceiling on a single
+	// build-brain-viz.py run. Not env-configurable (env:"-", no struct tag
+	// wired to Load): production always resolves through
+	// VizRebuildTimeoutOrDefault(), which falls back to
+	// defaultVizRebuildTimeout. This field exists so tests can override it to
+	// a few milliseconds and exercise the timeout-classification path without
+	// a real 5-minute wait.
+	VizRebuildTimeout time.Duration `env:"-"`
 }
 
 // DBUrl returns the PostgreSQL connection string.
@@ -146,6 +166,32 @@ func (c *Config) DBUrl() string {
 // WebAddr returns the host:port for the web server.
 func (c *Config) WebAddr() string {
 	return fmt.Sprintf("%s:%d", c.WebHost, c.WebPort)
+}
+
+// VizPythonInterpreter returns the Python interpreter to run VizScriptPath
+// with. Falls back to "python3" when VizPythonPath is empty, so a Config
+// built directly (bypassing Load's envDefault, as several tests do) still
+// gets the same zero-behavior-change default as an unset env var.
+func (c *Config) VizPythonInterpreter() string {
+	if c.VizPythonPath == "" {
+		return "python3"
+	}
+	return c.VizPythonPath
+}
+
+// defaultVizRebuildTimeout is the safety-bound ceiling on Ollama being slow
+// or unreachable, not the expected duration of a rebuild (see plan.md).
+const defaultVizRebuildTimeout = 5 * time.Minute
+
+// VizRebuildTimeoutOrDefault returns VizRebuildTimeout when set, or
+// defaultVizRebuildTimeout (5 minutes) otherwise. A Config built directly
+// with the field left zero (as every production path and most tests do)
+// gets the same 5-minute ceiling that predates this field's existence.
+func (c *Config) VizRebuildTimeoutOrDefault() time.Duration {
+	if c.VizRebuildTimeout <= 0 {
+		return defaultVizRebuildTimeout
+	}
+	return c.VizRebuildTimeout
 }
 
 // MCPAllowedHostsList splits MCPAllowedHosts into a trimmed slice, dropping
@@ -255,6 +301,36 @@ func validateOAuth(c *Config) error {
 	return nil
 }
 
+// defaultVizTTL is the staleness window for brain.json when OPENBRAIN_VIZ_TTL
+// is not set at all. See parseVizTTL for the unset-vs-empty distinction.
+const defaultVizTTL = 24 * time.Hour
+
+// parseVizTTL resolves OPENBRAIN_VIZ_TTL into a time.Duration.
+//
+// This is parsed by hand rather than through caarlos0/env's envDefault
+// struct tag because that library's default-value resolution (see getOr in
+// env.go) collapses an explicitly-empty env var into envDefault whenever a
+// default is configured, making OPENBRAIN_VIZ_TTL="" indistinguishable from
+// OPENBRAIN_VIZ_TTL unset. The two must differ here: unset means the 24h
+// default; "" (or "0"/"0s", any zero duration) means staleness is disabled.
+// isSet mirrors the second return value of os.LookupEnv.
+func parseVizTTL(raw string, isSet bool) (time.Duration, error) {
+	if !isSet {
+		return defaultVizTTL, nil
+	}
+	if raw == "" {
+		return 0, nil
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil {
+		return 0, fmt.Errorf("invalid OPENBRAIN_VIZ_TTL %q: %w", raw, err)
+	}
+	if d < 0 {
+		return 0, fmt.Errorf("invalid OPENBRAIN_VIZ_TTL %q: must not be negative", raw)
+	}
+	return d, nil
+}
+
 // Load reads .env and parses environment variables into a Config.
 // Each call creates a fresh Config — the caller owns the result.
 func Load() (*Config, error) {
@@ -286,6 +362,12 @@ func Load() (*Config, error) {
 	if err := validateWebWSToken(c); err != nil {
 		return nil, err
 	}
+	rawTTL, ttlSet := os.LookupEnv("OPENBRAIN_VIZ_TTL")
+	ttl, err := parseVizTTL(rawTTL, ttlSet)
+	if err != nil {
+		return nil, err
+	}
+	c.VizTTL = ttl
 	return c, nil
 }
 

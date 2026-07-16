@@ -5,14 +5,17 @@ import (
 	"crypto/subtle"
 	"embed"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io/fs"
 	"log/slog"
 	"net/http"
 	"os"
 	"os/exec"
+	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -99,7 +102,7 @@ func healthHandler(cfg *config.Config) http.HandlerFunc {
 // webOpenRoutes lists every route staticAuth gates, in the order they are
 // registered. Shared between the startup warning and its test so the two
 // cannot silently drift apart.
-var webOpenRoutes = []string{"/", "/graph", "/brain.json", "/api/rebuild-viz", "/api/search", "/api/search/nodes", "/api/thought/", "/api/capture", "/api/stats", "/api/review", "/api/ingest", "/ws"}
+var webOpenRoutes = []string{"/", "/graph", "/brain.json", "/api/rebuild-viz", "/api/rebuild-viz/status", "/api/search", "/api/search/nodes", "/api/thought/", "/api/capture", "/api/stats", "/api/review", "/api/ingest", "/ws"}
 
 // webOpenWriteEndpoints lists the subset of webOpenRoutes that perform a
 // write (disk write, brain mutation, or rebuild trigger).
@@ -146,7 +149,9 @@ func buildMux(cfg *config.Config, b *brain.Brain, embedder embeddings.Embedder) 
 	mux.Handle("/brain.json", staticAuth(cfg.WebWSToken, brainJSONHandler(staticSub, cfg.VizOutputPath)))
 	mux.HandleFunc("/health", healthHandler(cfg))
 
-	mux.Handle("/api/rebuild-viz", staticAuth(cfg.WebWSToken, apiRebuildViz(cfg)))
+	vizJob := &vizJobState{}
+	mux.Handle("/api/rebuild-viz", staticAuth(cfg.WebWSToken, apiRebuildViz(cfg, vizJob)))
+	mux.Handle("/api/rebuild-viz/status", staticAuth(cfg.WebWSToken, apiRebuildVizStatus(cfg, vizJob)))
 	mux.Handle("/api/search", staticAuth(cfg.WebWSToken, apiSearch(b)))
 	mux.Handle("/api/search/nodes", staticAuth(cfg.WebWSToken, apiSearchNodes(b)))
 	mux.Handle("/api/thought/", staticAuth(cfg.WebWSToken, apiGetThought(b)))
@@ -589,11 +594,258 @@ func brainJSONHandler(staticSub fs.FS, vizOutputPath string) http.Handler {
 // whether the build is degraded.
 const vizDegradedMarker = "BRAIN_VIZ_DEGRADED=true"
 
-// apiRebuildViz runs the build-brain-viz.py script to regenerate brain.json.
+// vizJobState tracks the single in-flight (or most recently finished) brain
+// map rebuild. There is at most one build-brain-viz.py process running at a
+// time: running is both the concurrency guard apiRebuildViz enforces before
+// spawning a goroutine, and the field apiRebuildVizStatus reads to report
+// state/degraded/error. All access goes through the methods below, which
+// hold mu for the duration of the read or write.
+type vizJobState struct {
+	mu       sync.Mutex
+	running  bool
+	hasRun   bool // a build has completed at least once; distinguishes "idle" from "done"/"error"
+	lastErr  error
+	degraded bool
+}
+
+// tryStart flips running to true and reports success, or reports failure
+// without changing state if a rebuild is already in flight. This is the
+// concurrency guard: apiRebuildViz calls it before spawning the goroutine,
+// so of any number of overlapping POSTs, exactly one wins the race and the
+// rest observe running already true and return 409.
+//
+// It also clears lastErr/degraded from the PRIOR run. Without this, a fresh
+// run's mid-flight /status response would still report the previous run's
+// degraded/error values: apiRebuildVizStatus only recomputes errMsg for the
+// hasRun-and-lastErr-non-nil branch, but passes degraded straight through
+// from the snapshot regardless of state, so a stale "degraded":true (or a
+// stale error) would sit alongside "state":"running" until THIS run's own
+// job.finish overwrites it.
+func (j *vizJobState) tryStart() bool {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	if j.running {
+		return false
+	}
+	j.running = true
+	j.lastErr = nil
+	j.degraded = false
+	return true
+}
+
+// finish records the outcome of a completed rebuild and clears running.
+func (j *vizJobState) finish(err error, degraded bool) {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	j.running = false
+	j.hasRun = true
+	j.lastErr = err
+	j.degraded = degraded
+}
+
+// snapshot copies the job state under lock so callers can read it without
+// holding the mutex across a JSON encode.
+func (j *vizJobState) snapshot() (running, hasRun, degraded bool, lastErr error) {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	return j.running, j.hasRun, j.degraded, j.lastErr
+}
+
+// vizProgressPath derives the progress sidecar path from vizOutputPath, so
+// no separate config var is needed for it. build-brain-viz.py (phase 2)
+// writes this file atomically (temp + os.replace) at phase boundaries and
+// after each cluster is labeled; apiRebuildVizStatus reads it back.
+func vizProgressPath(vizOutputPath string) string {
+	return vizOutputPath + ".progress.json"
+}
+
+// vizProgress is the shape of the progress sidecar file. Field names and
+// values match the schema build-brain-viz.py (phase 2) writes: pct 0-100,
+// phase one of loading/projecting/clustering/edges/labeling/writing/done,
+// clusters_done/clusters_total tracking the per-cluster labeling loop.
+type vizProgress struct {
+	Pct           int    `json:"pct"`
+	Phase         string `json:"phase"`
+	ClustersDone  int    `json:"clusters_done"`
+	ClustersTotal int    `json:"clusters_total"`
+}
+
+// readVizProgress reads the progress sidecar file. A missing file (no build
+// has started, or the sidecar has not been created yet), or one caught
+// mid-write, is not an error: it means "no progress yet", so the zero-valued
+// vizProgress is returned. Malformed JSON is treated the same way: the
+// writer's os.replace is atomic, but a defensive reader should not turn a
+// transient race into a 500.
+func readVizProgress(path string) vizProgress {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return vizProgress{}
+	}
+	var p vizProgress
+	if err := json.Unmarshal(data, &p); err != nil {
+		return vizProgress{}
+	}
+	return p
+}
+
+// resetVizProgress removes the progress sidecar file (if present) so a
+// freshly started rebuild does not momentarily report the PRIOR run's
+// pct:100/phase:"done" progress while the new process is still starting up
+// and has not yet written its own first progress update. readVizProgress
+// already tolerates a missing sidecar as zero-value progress (the "no
+// rebuild has started yet" case), so removal is equivalent to, and simpler
+// than, writing a fresh "starting" record: there is no second schema to keep
+// in sync with build-brain-viz.py's writer. A missing file (nothing to
+// remove: this is the very first rebuild) is not an error and is not logged.
+func resetVizProgress(vizOutputPath string) {
+	if err := os.Remove(vizProgressPath(vizOutputPath)); err != nil && !os.IsNotExist(err) {
+		slog.Warn("rebuild-viz: failed to reset progress sidecar for new run", "error", err)
+	}
+}
+
+// vizOutputTailMaxLen bounds how much of a failed rebuild's captured
+// stdout/stderr is echoed into the job-state error (and therefore into
+// /api/rebuild-viz/status's "error" field, and the UI). Uncapped, a runaway
+// script could turn the status endpoint into an unbounded log dump; capped,
+// enough of the tail survives to show WHY it failed (missing deps, DB down,
+// Ollama down) without that risk.
+const vizOutputTailMaxLen = 800
+
+// libpqCredentialRe matches libpq keyword/value connection-string credential
+// tokens (password=... or pwd=...), case-insensitive. build-brain-viz.py
+// builds its Postgres conninfo in libpq keyword/value form (e.g. "host=...
+// user=... password=<value> sslmode=disable"), never as a URL, so the
+// scheme://user:pass@host redaction below does not see it.
+//
+// libpq values are whitespace-delimited unless single-quoted. This pattern
+// matches either a single-quoted value (which may itself contain spaces) or
+// a bare non-whitespace token. A password containing an UNQUOTED space (the
+// shape that actually leaks: build-brain-viz.py does not quote the password
+// when it builds the conninfo string, so a spaced passphrase both breaks the
+// conninfo parse AND leaks) only has its first whitespace-delimited token
+// redacted; anything after the first space is not distinguishable from
+// surrounding connection-string keywords and is left alone. This mirrors the
+// URL-DSN redaction below: both scrub the known credential shape, not every
+// possible substring that could theoretically be a password fragment.
+var libpqCredentialRe = regexp.MustCompile(`(?i)\b(password|pwd)=('[^']*'|\S+)`)
+
+// redactLikelyCredentialsInLine scans a single line of subprocess output for
+// credential-bearing patterns and redacts them:
+//   - a scheme://user:pass@host pattern (a DB DSN, or a URL with embedded
+//     credentials), mirroring internal/db.redactDSN
+//   - a libpq keyword/value password=... or pwd=... token (see
+//     libpqCredentialRe)
+//
+// Ordinary Python tracebacks and print() output rarely match either pattern,
+// so this is a no-op for the overwhelming majority of lines.
+func redactLikelyCredentialsInLine(line string) string {
+	line = redactURLCredentials(line)
+	return libpqCredentialRe.ReplaceAllString(line, "${1}=[REDACTED]")
+}
+
+// redactURLCredentials redacts the credential portion of a scheme://user:pass@host
+// pattern (a DB DSN, or a URL with embedded credentials), mirroring
+// internal/db.redactDSN.
+func redactURLCredentials(line string) string {
+	schemeIdx := strings.Index(line, "://")
+	if schemeIdx == -1 {
+		return line
+	}
+	rest := line[schemeIdx+3:]
+	atIdx := strings.Index(rest, "@")
+	if atIdx == -1 {
+		return line
+	}
+	return line[:schemeIdx+3] + "***@" + rest[atIdx+1:]
+}
+
+// boundedOutputTail trims a failed rebuild's captured output to at most
+// vizOutputTailMaxLen bytes, keeping the END of the output (the traceback or
+// final error line is almost always last) rather than the start, and
+// redacting any line that looks like a DSN or URL with embedded credentials.
+func boundedOutputTail(out []byte) string {
+	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+	for i, line := range lines {
+		lines[i] = redactLikelyCredentialsInLine(line)
+	}
+	tail := strings.Join(lines, "\n")
+	if len(tail) <= vizOutputTailMaxLen {
+		return tail
+	}
+	return "...(truncated)...\n" + tail[len(tail)-vizOutputTailMaxLen:]
+}
+
+// classifyVizRebuildFailure turns a failed rebuild's process error, the
+// context's own error (nil unless the timeout fired), and the captured
+// output into the error surfaced via job.finish (and therefore
+// /api/rebuild-viz/status's "error" field).
+//
+// A context deadline exceeded is reported distinctly ("rebuild timed out
+// after ...") instead of the opaque "signal: killed" exec.CommandContext
+// leaves behind when it kills the process on timeout: the two failure modes
+// need different operator responses (a hung/unreachable Ollama vs. an
+// ordinary script error), and "signal: killed" alone gives no hint which one
+// happened.
+//
+// Any other failure is wrapped with a bounded tail of the captured output
+// (see boundedOutputTail), so an operator can see WHY it failed without
+// reading the server log.
+func classifyVizRebuildFailure(cmdErr error, ctxErr error, out []byte, timeout time.Duration) error {
+	if errors.Is(ctxErr, context.DeadlineExceeded) {
+		return fmt.Errorf("rebuild timed out after %s; the generator may be hung or Ollama unreachable", timeout)
+	}
+	tail := boundedOutputTail(out)
+	if tail == "" {
+		return fmt.Errorf("rebuild failed: %w", cmdErr)
+	}
+	return fmt.Errorf("rebuild failed: %w: %s", cmdErr, tail)
+}
+
+// runVizRebuild runs build-brain-viz.py to completion and records the
+// outcome on job. It owns the process end-to-end and is deliberately NOT
+// tied to any request context: the goroutine outlives the HTTP request that
+// triggered it (the handler returns 202 immediately), and a client
+// disconnecting must not kill a rebuild another poller is waiting on.
+// cfg.VizRebuildTimeoutOrDefault() is a safety bound on Ollama being slow or
+// unreachable, not the expected duration (see plan.md).
+func runVizRebuild(cfg *config.Config, job *vizJobState) {
+	timeout := cfg.VizRebuildTimeoutOrDefault()
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, cfg.VizPythonInterpreter(), cfg.VizScriptPath, "--output", cfg.VizOutputPath, "--progress-file", vizProgressPath(cfg.VizOutputPath))
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		slog.Error("rebuild-viz failed", "error", err, "output", string(out))
+		job.finish(classifyVizRebuildFailure(err, ctx.Err(), out, timeout), false)
+		return
+	}
+
+	// A successful exit does not mean a fully-labeled map: the script exits 0
+	// even when every cluster fell back to heuristic labels (Ollama
+	// unreachable). Surface that degradation instead of silently discarding
+	// it, without failing a rebuild that otherwise succeeded.
+	degraded := strings.Contains(string(out), vizDegradedMarker)
+	if degraded {
+		slog.Warn("rebuild-viz succeeded with degraded cluster labels (heuristic only, LLM unreachable)",
+			"output_path", cfg.VizOutputPath, "output", string(out))
+	} else {
+		slog.Info("rebuild-viz succeeded", "output_path", cfg.VizOutputPath)
+	}
+	job.finish(nil, degraded)
+}
+
+// apiRebuildViz triggers a brain.json rebuild via build-brain-viz.py.
 // Route: POST /api/rebuild-viz
 // Auth: handled by staticAuth at registration time.
 // Requires OPENBRAIN_VIZ_SCRIPT_PATH and OPENBRAIN_VIZ_OUTPUT_PATH to be set.
-func apiRebuildViz(cfg *config.Config) http.HandlerFunc {
+//
+// Async: the handler never blocks on the script. It returns 202 and starts
+// the rebuild in a goroutine, or 409 if a rebuild is already running (the
+// concurrency guard: job.tryStart ensures only one build-brain-viz.py process
+// runs at a time regardless of how many callers POST concurrently). Callers
+// poll GET /api/rebuild-viz/status for progress and outcome.
+func apiRebuildViz(cfg *config.Config, job *vizJobState) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -605,28 +857,87 @@ func apiRebuildViz(cfg *config.Config) http.HandlerFunc {
 			return
 		}
 
-		ctx, cancel := context.WithTimeout(r.Context(), 5*time.Minute)
-		defer cancel()
-
-		cmd := exec.CommandContext(ctx, "python3", cfg.VizScriptPath, "--output", cfg.VizOutputPath)
-		out, err := cmd.CombinedOutput()
-		if err != nil {
-			slog.Error("rebuild-viz failed", "error", err, "output", string(out))
-			http.Error(w, "rebuild failed: "+err.Error(), http.StatusInternalServerError)
+		if !job.tryStart() {
+			http.Error(w, "rebuild already in progress", http.StatusConflict)
 			return
 		}
 
-		// A successful exit does not mean a fully-labeled map: the script
-		// exits 0 even when every cluster fell back to heuristic labels
-		// (Ollama unreachable). Surface that degradation instead of silently
-		// discarding it, without failing a rebuild that otherwise succeeded.
-		degraded := strings.Contains(string(out), vizDegradedMarker)
-		if degraded {
-			slog.Warn("rebuild-viz succeeded with degraded cluster labels (heuristic only, LLM unreachable)",
-				"output_path", cfg.VizOutputPath, "output", string(out))
-		} else {
-			slog.Info("rebuild-viz succeeded", "output_path", cfg.VizOutputPath)
+		// Reset the progress sidecar synchronously, before returning 202, so a
+		// client that immediately polls /status after triggering never
+		// observes the PRIOR run's stale pct/phase (a race the goroutine
+		// below cannot close: it may not reach its own first progress write
+		// for some time after the process starts).
+		resetVizProgress(cfg.VizOutputPath)
+
+		go runVizRebuild(cfg, job)
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusAccepted)
+		_ = json.NewEncoder(w).Encode(map[string]any{"status": "started"})
+	}
+}
+
+// vizIsStale reports whether brain.json is older than ttl, given elapsed
+// (time.Since(mtime)). A zero or negative ttl disables the staleness check
+// entirely, regardless of elapsed. The comparison is strictly greater-than:
+// a file exactly ttl old is NOT stale. Extracted to a pure function because
+// the exact-equality boundary (elapsed == ttl) cannot be reproduced
+// deterministically through a real file mtime and time.Since call: by the
+// time the check runs, elapsed has always advanced past whatever offset a
+// test set up.
+func vizIsStale(ttl, elapsed time.Duration) bool {
+	return ttl > 0 && elapsed > ttl
+}
+
+// apiRebuildVizStatus reports the state of the brain-map rebuild job, merging
+// three sources: the in-memory job state (state/degraded/error), the
+// progress sidecar file build-brain-viz.py writes while it runs
+// (pct/phase/clusters_done/clusters_total), and brain.json's own presence
+// and mtime (exists/stale, per OPENBRAIN_VIZ_TTL). The frontend (phase 3)
+// polls this endpoint to drive a determinate progress bar and to decide
+// whether a rebuild needs triggering at all.
+// Route: GET /api/rebuild-viz/status
+// Auth: handled by staticAuth at registration time.
+func apiRebuildVizStatus(cfg *config.Config, job *vizJobState) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
 		}
-		jsonResponse(w, map[string]any{"status": "ok", "degraded": degraded})
+
+		running, hasRun, degraded, lastErr := job.snapshot()
+
+		state := "idle"
+		errMsg := ""
+		switch {
+		case running:
+			state = "running"
+		case hasRun && lastErr != nil:
+			state = "error"
+			errMsg = lastErr.Error()
+		case hasRun:
+			state = "done"
+		}
+
+		progress := readVizProgress(vizProgressPath(cfg.VizOutputPath))
+
+		exists := false
+		stale := false
+		if info, statErr := os.Stat(cfg.VizOutputPath); statErr == nil {
+			exists = true
+			stale = vizIsStale(cfg.VizTTL, time.Since(info.ModTime()))
+		}
+
+		jsonResponse(w, map[string]any{
+			"state":          state,
+			"pct":            progress.Pct,
+			"phase":          progress.Phase,
+			"clusters_done":  progress.ClustersDone,
+			"clusters_total": progress.ClustersTotal,
+			"exists":         exists,
+			"stale":          stale,
+			"degraded":       degraded,
+			"error":          errMsg,
+		})
 	}
 }

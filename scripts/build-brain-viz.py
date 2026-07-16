@@ -17,6 +17,9 @@ Options:
     --min-cluster N     HDBSCAN min_cluster_size (default: 8)
     --max-edges N       Max similarity edges (default: 2000)
     --sim-thresh F      Min cosine similarity for an edge (default: 0.55)
+    --progress-file PATH  Write a progress status JSON to PATH as generation
+                        proceeds (default: no progress file written; the
+                        script behaves exactly as before this flag existed)
 
 Requirements (install in a venv):
     pip install -r scripts/requirements-viz.txt
@@ -27,6 +30,7 @@ import json
 import os
 import sys
 import tempfile
+import time
 from pathlib import Path
 from typing import Any
 
@@ -303,6 +307,51 @@ def _atomic_write(path: Path, text: str) -> None:
         raise
 
 
+def _write_progress(
+    progress_path: Path | None,
+    phase: str,
+    pct: int,
+    clusters_done: int = 0,
+    clusters_total: int = 0,
+) -> None:
+    """Best-effort atomic write of the progress sidecar JSON.
+
+    No-op when *progress_path* is None, which is the default and keeps
+    plain `make viz` / no-flag runs byte-for-byte unchanged. The write is
+    atomic (temp file in the same directory, then os.replace) so a reader
+    polling this path never observes a partial document. Unlike
+    `_atomic_write`, failures here are logged and swallowed rather than
+    raised: progress reporting is telemetry for the async job status
+    endpoint, not part of the pipeline's actual output, so a sidecar write
+    failure must never abort real generation work.
+    """
+    if progress_path is None:
+        return
+    payload: dict[str, str | int | float] = {
+        "pct": pct,
+        "phase": phase,
+        "clusters_done": clusters_done,
+        "clusters_total": clusters_total,
+        "ts": time.time(),
+    }
+    text = json.dumps(payload)
+    try:
+        progress_path.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(dir=progress_path.parent, suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(text)
+            os.replace(tmp, progress_path)
+        except Exception:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
+    except Exception as exc:
+        print(f"  [warn] failed to write progress file {progress_path}: {exc}", file=sys.stderr)
+
+
 def parse_args(default_output: Path) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Build OpenBrain brain visualizer data")
     parser.add_argument("--output", default=str(default_output), metavar="PATH",
@@ -319,6 +368,9 @@ def parse_args(default_output: Path) -> argparse.Namespace:
                         help="Max similarity edges (default: 2000)")
     parser.add_argument("--sim-thresh", type=float, default=0.55, metavar="F",
                         help="Min cosine similarity for an edge (default: 0.55)")
+    parser.add_argument("--progress-file", default=None, metavar="PATH",
+                        help="Write a progress status JSON to PATH as generation "
+                             "proceeds (default: no progress file written)")
     return parser.parse_args()
 
 
@@ -375,16 +427,26 @@ def label_clusters(
     cfg: dict,
     ollama_model: str,
     no_llm: bool,
+    progress_path: Path | None = None,
 ) -> tuple[list[dict], int, int]:
     """Build cluster metadata with labels.
 
     Returns (clusters_out, llm_attempts, llm_fallbacks).
+
+    This is the dominant, minute-scale cost (one sequential Ollama call per
+    cluster), so it is the granular part of the progress signal: pct climbs
+    from 50 to 95 as clusters_done advances toward clusters_total.
     """
     clusters_out: list[dict] = []
     llm_attempts = 0
     llm_fallbacks = 0
 
-    for cid in sorted(set(labels)):
+    cluster_ids = sorted(set(labels))
+    clusters_total = len(cluster_ids)
+    clusters_done = 0
+    _write_progress(progress_path, "labeling", 50, clusters_done, clusters_total)
+
+    for cid in cluster_ids:
         members = [thoughts[i] for i, lbl in enumerate(labels) if lbl == cid]
         member_coords = [coords_2d[i] for i, lbl in enumerate(labels) if lbl == cid]
         heuristic = heuristic_label(members)
@@ -415,6 +477,13 @@ def label_clusters(
             "cx": round(float(arr[:, 0].mean()), 4),
             "cy": round(float(arr[:, 1].mean()), 4),
         })
+
+        clusters_done += 1
+        # clusters_total is len(cluster_ids); this loop only runs when
+        # cluster_ids is non-empty (we're iterating over it), so
+        # clusters_total is always >= 1 here and the division is safe.
+        pct = 50 + int(45 * clusters_done / clusters_total)
+        _write_progress(progress_path, "labeling", pct, clusters_done, clusters_total)
 
     return clusters_out, llm_attempts, llm_fallbacks
 
@@ -474,6 +543,8 @@ def run_pipeline(args: argparse.Namespace) -> None:
     repo_root = script_dir.parent
     graph_html_path = repo_root / "cmd" / "openbrain-web" / "static" / "graph.html"
 
+    progress_path = Path(args.progress_file) if args.progress_file else None
+
     cfg = load_config(script_dir, repo_root)
 
     # Resolve the Ollama model up-front only when LLM labeling is requested.
@@ -484,6 +555,7 @@ def run_pipeline(args: argparse.Namespace) -> None:
         print(f"  LLM model: {ollama_model}")
 
     print("\n[1/6] Loading thoughts from database…")
+    _write_progress(progress_path, "loading", 5)
     thoughts = load_thoughts(cfg)
     if not thoughts:
         print("ERROR: no thoughts found")
@@ -492,9 +564,11 @@ def run_pipeline(args: argparse.Namespace) -> None:
     embeddings_arr = np.stack([t["embedding"] for t in thoughts])
 
     print("\n[2/6] Projecting embeddings to 2D…")
+    _write_progress(progress_path, "projecting", 15)
     coords_2d = project_2d(embeddings_arr, use_umap=(args.kmeans == 0))
 
     print("\n[3/6] Clustering…")
+    _write_progress(progress_path, "clustering", 35)
     if args.kmeans > 0:
         labels = cluster_kmeans(embeddings_arr, k=args.kmeans)
     else:
@@ -509,12 +583,14 @@ def run_pipeline(args: argparse.Namespace) -> None:
     labels = [id_map[lbl] for lbl in labels]
 
     print("\n[4/6] Computing similarity edges…")
+    _write_progress(progress_path, "edges", 45)
     edges = compute_edges(embeddings_arr, sim_thresh=args.sim_thresh,
                           max_edges=args.max_edges)
 
     print("\n[5/6] Generating cluster labels…")
     clusters_out, llm_attempts, llm_fallbacks = label_clusters(
         thoughts, coords_2d, labels, cfg, ollama_model, args.no_llm,
+        progress_path=progress_path,
     )
 
     # Warn loudly if the LLM service was completely unreachable, and print a
@@ -529,12 +605,15 @@ def run_pipeline(args: argparse.Namespace) -> None:
         print(f"\n  [info] {llm_fallbacks}/{llm_attempts} clusters used heuristic labels")
 
     print("\n[6/6] Writing output…")
+    total_clusters = len(clusters_out)
+    _write_progress(progress_path, "writing", 95, total_clusters, total_clusters)
     data = build_data(thoughts, coords_2d, labels, edges, clusters_out, cfg)
     data_json = json.dumps(data, ensure_ascii=False)
 
     output_path = Path(args.output)
     standalone_path = Path(args.standalone) if args.standalone else None
     write_output(data_json, output_path, standalone_path, graph_html_path)
+    _write_progress(progress_path, "done", 100, total_clusters, total_clusters)
 
     print(f"   {data['meta']['n_thoughts']} nodes · {data['meta']['n_clusters']} clusters · {data['meta']['n_edges']} edges")
     print(f"\n   Rebuild anytime:  make viz")
