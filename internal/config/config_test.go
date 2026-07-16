@@ -340,6 +340,39 @@ func TestVizTTL_NegativeValue_FailsLoad(t *testing.T) {
 	}
 }
 
+// TestVizPythonPath_DefaultsToPython3 confirms an unset OPENBRAIN_VIZ_PYTHON
+// resolves to "python3", so the rebuild pipeline's behavior is unchanged for
+// every install that hasn't provisioned a dedicated venv yet.
+func TestVizPythonPath_DefaultsToPython3(t *testing.T) {
+	cfg, err := Load()
+	assert.NoError(t, err)
+	assert.Equal(t, "python3", cfg.VizPythonPath)
+}
+
+// TestVizPythonPath_FromEnv confirms OPENBRAIN_VIZ_PYTHON overrides the
+// default, e.g. to point at a venv python with the viz deps installed.
+func TestVizPythonPath_FromEnv(t *testing.T) {
+	t.Setenv("OPENBRAIN_VIZ_PYTHON", "/opt/openbrain-viz-venv/bin/python3")
+	cfg, err := Load()
+	assert.NoError(t, err)
+	assert.Equal(t, "/opt/openbrain-viz-venv/bin/python3", cfg.VizPythonPath)
+}
+
+// TestVizPythonInterpreter_FallsBackToPython3WhenFieldEmpty confirms the
+// accessor's own fallback (not just the envDefault tag) so a Config built
+// directly, bypassing Load, still gets the zero-behavior-change default.
+func TestVizPythonInterpreter_FallsBackToPython3WhenFieldEmpty(t *testing.T) {
+	cfg := &Config{}
+	assert.Equal(t, "python3", cfg.VizPythonInterpreter())
+}
+
+// TestVizPythonInterpreter_ReturnsConfiguredValue confirms a set
+// VizPythonPath flows straight through the accessor unchanged.
+func TestVizPythonInterpreter_ReturnsConfiguredValue(t *testing.T) {
+	cfg := &Config{VizPythonPath: "/opt/openbrain-viz-venv/bin/python3"}
+	assert.Equal(t, "/opt/openbrain-viz-venv/bin/python3", cfg.VizPythonInterpreter())
+}
+
 func TestTesseractLangsValidation_AcceptsValid(t *testing.T) {
 	tests := []struct {
 		name  string

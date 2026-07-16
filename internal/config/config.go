@@ -127,6 +127,11 @@ type Config struct {
 	// Brain visualization
 	VizScriptPath string `env:"OPENBRAIN_VIZ_SCRIPT_PATH"` // path to build-brain-viz.py; empty disables the rebuild endpoint
 	VizOutputPath string `env:"OPENBRAIN_VIZ_OUTPUT_PATH"` // path where brain.json is written and served from disk
+	// VizPythonPath is the Python interpreter used to run VizScriptPath.
+	// Defaults to "python3" resolved off the service's own PATH, which has
+	// none of the viz pipeline's dependencies (numpy, umap, hdbscan, psycopg).
+	// Point this at a dedicated venv's python binary once one is provisioned.
+	VizPythonPath string `env:"OPENBRAIN_VIZ_PYTHON" envDefault:"python3"`
 	// VizTTL is the max age of brain.json before /api/rebuild-viz/status
 	// reports it stale. Parsed by hand in Load (env:"-" here), not through
 	// the struct tag: see parseVizTTL for why an explicitly empty env var
@@ -153,6 +158,17 @@ func (c *Config) DBUrl() string {
 // WebAddr returns the host:port for the web server.
 func (c *Config) WebAddr() string {
 	return fmt.Sprintf("%s:%d", c.WebHost, c.WebPort)
+}
+
+// VizPythonInterpreter returns the Python interpreter to run VizScriptPath
+// with. Falls back to "python3" when VizPythonPath is empty, so a Config
+// built directly (bypassing Load's envDefault, as several tests do) still
+// gets the same zero-behavior-change default as an unset env var.
+func (c *Config) VizPythonInterpreter() string {
+	if c.VizPythonPath == "" {
+		return "python3"
+	}
+	return c.VizPythonPath
 }
 
 // MCPAllowedHostsList splits MCPAllowedHosts into a trimmed slice, dropping

@@ -687,7 +687,7 @@ func runVizRebuild(cfg *config.Config, job *vizJobState) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, "python3", cfg.VizScriptPath, "--output", cfg.VizOutputPath, "--progress-file", vizProgressPath(cfg.VizOutputPath))
+	cmd := exec.CommandContext(ctx, cfg.VizPythonInterpreter(), cfg.VizScriptPath, "--output", cfg.VizOutputPath, "--progress-file", vizProgressPath(cfg.VizOutputPath))
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		slog.Error("rebuild-viz failed", "error", err, "output", string(out))

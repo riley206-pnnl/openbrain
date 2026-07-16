@@ -251,6 +251,57 @@ print("all clusters labeled via LLM")
 	assert.Equal(t, 1, lines, "exactly one build-brain-viz.py process must have run despite two concurrent POSTs")
 }
 
+// TestApiRebuildViz_UsesConfiguredPythonInterpreter confirms runVizRebuild
+// invokes cfg.VizPythonPath rather than a hardcoded "python3", by pointing
+// VizPythonPath at a nonexistent interpreter path and asserting the job
+// fails with that exact path in the error. If the exec call ignored the
+// config field and fell back to "python3" off PATH, this would either
+// succeed (wrong interpreter, no error) or fail with a different message.
+func TestApiRebuildViz_UsesConfiguredPythonInterpreter(t *testing.T) {
+	cfg := rebuildVizCfg(t, `print("all clusters labeled via LLM")`)
+	cfg.VizPythonPath = "/nonexistent/does-not-exist/python3-viz-venv"
+
+	job := &vizJobState{}
+	h := apiRebuildViz(cfg, job)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/rebuild-viz", nil)
+	rr := httptest.NewRecorder()
+	h(rr, req)
+	require.Equal(t, http.StatusAccepted, rr.Code)
+
+	waitForJobDone(t, job)
+	_, hasRun, degraded, lastErr := job.snapshot()
+	assert.True(t, hasRun)
+	assert.False(t, degraded)
+	require.Error(t, lastErr)
+	assert.Contains(t, lastErr.Error(), "does-not-exist",
+		"error must reference the configured interpreter path, proving it was actually used")
+}
+
+// TestApiRebuildViz_DefaultsToPython3WhenInterpreterUnset confirms a Config
+// with VizPythonPath left unset (the zero value, as every other test in this
+// file constructs it) still resolves the real "python3" and runs the fake
+// script successfully, i.e. zero behavior change from before this field
+// existed.
+func TestApiRebuildViz_DefaultsToPython3WhenInterpreterUnset(t *testing.T) {
+	cfg := rebuildVizCfg(t, `print("all clusters labeled via LLM")`)
+	require.Empty(t, cfg.VizPythonPath, "test setup: VizPythonPath must be unset to exercise the default")
+
+	job := &vizJobState{}
+	h := apiRebuildViz(cfg, job)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/rebuild-viz", nil)
+	rr := httptest.NewRecorder()
+	h(rr, req)
+	require.Equal(t, http.StatusAccepted, rr.Code)
+
+	waitForJobDone(t, job)
+	_, hasRun, degraded, lastErr := job.snapshot()
+	assert.True(t, hasRun)
+	assert.False(t, degraded)
+	assert.NoError(t, lastErr)
+}
+
 // ── /api/rebuild-viz/status ──────────────────────────────────────────────
 
 func TestApiRebuildVizStatus_WrongMethod_Returns405(t *testing.T) {
