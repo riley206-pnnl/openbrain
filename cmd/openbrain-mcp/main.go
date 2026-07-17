@@ -4,8 +4,6 @@ package main
 
 import (
 	"context"
-	"fmt"
-	"io"
 	"log/slog"
 	"os"
 
@@ -20,13 +18,20 @@ func main() {
 	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo})))
 
 	// --version reports the build version and exits before any config load,
-	// DB connection, or server start, matching cmd/openbrain's --version
-	// path. A version check must boot with zero dependencies: without this
-	// guard, running "openbrain-mcp --version" silently ignored the flag,
-	// loaded config, connected to the live database, and started a
-	// long-running MCP server, leaving an orphaned process behind.
-	if versionRequested(os.Args[1:]) {
-		printVersion(os.Stdout)
+	// DB connection, or server start. A version check must boot with zero
+	// dependencies: without this guard, running "openbrain-mcp --version"
+	// silently ignored the flag, loaded config, connected to the live
+	// database, and started a long-running MCP server, leaving an orphaned
+	// process behind. version.HandleFlag is the single shared
+	// implementation every openbrain binary delegates to. A non-nil err
+	// (the write to stdout failed) must exit non-zero: silently returning 0
+	// would make a failed version print indistinguishable from a
+	// successful one to a caller that only checks the exit code.
+	if handled, err := version.HandleFlag(os.Args[1:], os.Stdout); handled {
+		if err != nil {
+			slog.Error("printing version failed", "error", err)
+			os.Exit(1)
+		}
 		return
 	}
 
@@ -55,17 +60,4 @@ func main() {
 		slog.Error("mcp server failed", "error", err)
 		os.Exit(1)
 	}
-}
-
-// versionRequested reports whether the version flag was passed as the first
-// argument. Matches cmd/openbrain's convention: the flag form only, checked
-// before any other argument handling, so it must run first in main.
-func versionRequested(args []string) bool {
-	return len(args) > 0 && args[0] == "--version"
-}
-
-// printVersion writes the canonical build version to w, the same format
-// cmd/openbrain uses for its --version output.
-func printVersion(w io.Writer) {
-	fmt.Fprintln(w, version.Version)
 }

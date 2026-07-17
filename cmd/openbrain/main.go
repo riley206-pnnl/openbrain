@@ -36,8 +36,16 @@ func main() {
 	// free-text capture path (for example, "version 2 ships tomorrow" would be
 	// swallowed instead of captured as a thought), so it is deliberately not a
 	// trigger.
+	//
+	// The write error is checked (not discarded) and treated as a hard
+	// failure: silently returning 0 on a failed print would make the
+	// canary's version query indistinguishable from success to anything
+	// that only checks the exit code.
 	if os.Args[1] == "--version" {
-		fmt.Println(version.Version)
+		if _, err := fmt.Println(version.Version); err != nil {
+			fmt.Fprintf(os.Stderr, "error: printing version failed: %v\n", err)
+			os.Exit(1)
+		}
 		return
 	}
 

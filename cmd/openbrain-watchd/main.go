@@ -14,11 +14,29 @@ import (
 	"github.com/windingriverholdings/openbrain/internal/config"
 	"github.com/windingriverholdings/openbrain/internal/db"
 	"github.com/windingriverholdings/openbrain/internal/embeddings"
+	"github.com/windingriverholdings/openbrain/internal/version"
 	"github.com/windingriverholdings/openbrain/internal/watcher"
 )
 
 func main() {
 	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo})))
+
+	// --version reports the build version and exits before any config load,
+	// DB connection, or watcher start. A version check must boot with zero
+	// dependencies: without this guard, running "openbrain-watchd --version"
+	// panicked loading config (OPENBRAIN_DB_PASSWORD required) before the
+	// flag was ever read. version.HandleFlag is the single shared
+	// implementation every openbrain binary delegates to. A non-nil err
+	// (the write to stdout failed) must exit non-zero: silently returning 0
+	// would make a failed version print indistinguishable from a
+	// successful one to a caller that only checks the exit code.
+	if handled, err := version.HandleFlag(os.Args[1:], os.Stdout); handled {
+		if err != nil {
+			slog.Error("printing version failed", "error", err)
+			os.Exit(1)
+		}
+		return
+	}
 
 	cfg := config.MustLoad()
 
