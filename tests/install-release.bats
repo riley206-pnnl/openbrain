@@ -63,6 +63,40 @@ make_fixture_set() {
   write_sums "$dir" "${assets[@]}"
 }
 
+# write_fake_gh writes a stub `gh` at dir/gh handling exactly the two call
+# shapes resolve_version uses: `gh auth status`, `gh release view <tag>
+# --repo <repo>` (existence check), and `gh release view --repo <repo>
+# --json tagName -q .tagName` (latest resolution). Behavior is controlled by
+# env vars so one stub covers every resolve_version scenario:
+#   FAKE_GH_AUTH_OK     1 (default) = authenticated, 0 = not authenticated
+#   FAKE_GH_TAG_EXISTS  1 (default) = the requested tag exists, 0 = it does not
+#   FAKE_GH_LATEST_TAG  the tag printed for the no-args "latest" resolution
+write_fake_gh() {
+  local dir="$1"
+  cat > "${dir}/gh" <<'EOF'
+#!/usr/bin/env bash
+if [[ "$1" == "auth" && "$2" == "status" ]]; then
+  [[ "${FAKE_GH_AUTH_OK:-1}" == "1" ]] && exit 0
+  exit 1
+fi
+if [[ "$1" == "release" && "$2" == "view" ]]; then
+  shift 2
+  if [[ "$1" != --* ]]; then
+    [[ "${FAKE_GH_TAG_EXISTS:-1}" == "1" ]] && exit 0
+    exit 1
+  fi
+  if [[ -n "${FAKE_GH_LATEST_TAG:-}" ]]; then
+    printf '%s\n' "${FAKE_GH_LATEST_TAG}"
+    exit 0
+  fi
+  exit 1
+fi
+echo "fake gh: unhandled args: $*" >&2
+exit 99
+EOF
+  chmod +x "${dir}/gh"
+}
+
 # --- asset_filename -----------------------------------------------------
 
 @test "asset_filename builds the binary-version-platform name" {
@@ -188,7 +222,7 @@ EOF
   done
 
   # No leftover temp dotfiles from the write-to-temp-then-rename step.
-  run bash -c "shopt -s dotglob nullglob; ls '${install_dir}'"
+  run bash -c "ls -A '${install_dir}'"
   [[ "$output" != *".openbrain"* ]]
 }
 
@@ -236,7 +270,7 @@ EOF
   [ "$output" = "OLD-openbrain-watchd" ]
 
   # No leftover temp dotfiles.
-  run bash -c "shopt -s dotglob nullglob; ls '${install_dir}'"
+  run bash -c "ls -A '${install_dir}'"
   [[ "$output" != *".openbrain-slack."* ]]
 }
 
@@ -294,4 +328,176 @@ EOF
   for name in openbrain-web openbrain-telegram openbrain-slack openbrain-watchd; do
     "${install_dir}/${name}" --version | grep -q v9.9.9
   done
+}
+
+# --- CRITICAL (Wren): atomic_install must fail closed on a chmod failure ---
+
+@test "atomic_install fails closed when chmod fails, installs nothing, and logs no success" {
+  make_fixture_set "$WORK_DIR" v9.9.9
+  local install_dir="${WORK_DIR}/install"
+  mkdir -p "$install_dir"
+
+  # A fake chmod that always fails, prepended to PATH so it shadows the real
+  # one while mktemp/cp/mv/sha256sum still resolve normally.
+  local fake_bin="${WORK_DIR}/fakebin-chmod"
+  mkdir -p "$fake_bin"
+  cat > "${fake_bin}/chmod" <<'EOF'
+#!/usr/bin/env bash
+echo "chmod: simulated failure" >&2
+exit 1
+EOF
+  chmod +x "${fake_bin}/chmod"
+
+  run env PATH="${fake_bin}:${PATH}" bash -c "source '$SCRIPT'; atomic_install '${WORK_DIR}' '${install_dir}' v9.9.9 openbrain-web"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"install"* ]]
+  # No success message is ever logged for a run that aborted mid-loop.
+  [[ "$output" != *"installed:"* ]]
+  # Nothing is visible under the real name: the rename never happened.
+  [ ! -f "${install_dir}/openbrain-web" ]
+  # No leftover temp dotfile: the failed chmod's temp file was cleaned up.
+  run bash -c "ls -A '${install_dir}'"
+  [[ "$output" != *".openbrain-web."* ]]
+}
+
+# --- HIGH (Tess): resolve_version ------------------------------------------
+
+@test "resolve_version aborts and names the tag when the requested tag does not exist" {
+  local fake_bin="${WORK_DIR}/fakebin-gh"
+  mkdir -p "$fake_bin"
+  write_fake_gh "$fake_bin"
+
+  run env PATH="${fake_bin}:${PATH}" FAKE_GH_AUTH_OK=1 FAKE_GH_TAG_EXISTS=0 \
+    bash -c "source '$SCRIPT'; resolve_version windingriverholdings/openbrain v0.0.0-missing"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"v0.0.0-missing"* ]]
+}
+
+@test "resolve_version accepts a requested tag that exists via gh" {
+  local fake_bin="${WORK_DIR}/fakebin-gh"
+  mkdir -p "$fake_bin"
+  write_fake_gh "$fake_bin"
+
+  run env PATH="${fake_bin}:${PATH}" FAKE_GH_AUTH_OK=1 FAKE_GH_TAG_EXISTS=1 \
+    bash -c "source '$SCRIPT'; resolve_version windingriverholdings/openbrain v1.0.0"
+  [ "$status" -eq 0 ]
+  [ "$output" = "v1.0.0" ]
+}
+
+@test "resolve_version resolves the latest release via gh when no tag is requested" {
+  local fake_bin="${WORK_DIR}/fakebin-gh"
+  mkdir -p "$fake_bin"
+  write_fake_gh "$fake_bin"
+
+  run env PATH="${fake_bin}:${PATH}" FAKE_GH_AUTH_OK=1 FAKE_GH_LATEST_TAG=v1.2.3 \
+    bash -c "source '$SCRIPT'; resolve_version windingriverholdings/openbrain ''"
+  [ "$status" -eq 0 ]
+  [ "$output" = "v1.2.3" ]
+}
+
+@test "resolve_version falls back to curl/jq for latest release when gh is unavailable" {
+  # PATH is replaced entirely (not prepended): this proves the curl/jq
+  # fallback works with no gh reachable at all, not merely with gh failing.
+  local fake_bin="${WORK_DIR}/fakebin-nogh"
+  mkdir -p "$fake_bin"
+  ln -s "$(command -v bash)" "${fake_bin}/bash"
+
+  cat > "${fake_bin}/curl" <<'EOF'
+#!/usr/bin/env bash
+echo '{"tag_name":"v2.0.0"}'
+EOF
+  chmod +x "${fake_bin}/curl"
+
+  # Minimal stand-in for `jq -r '.tag_name'` against the fixed curl stub
+  # output, using only bash builtins so no further PATH entries are needed.
+  cat > "${fake_bin}/jq" <<'EOF'
+#!/usr/bin/env bash
+read -r line
+line="${line#*\"tag_name\":\"}"
+line="${line%%\"*}"
+printf '%s\n' "$line"
+EOF
+  chmod +x "${fake_bin}/jq"
+
+  run env PATH="$fake_bin" bash -c "source '$SCRIPT'; resolve_version windingriverholdings/openbrain ''"
+  [ "$status" -eq 0 ]
+  [ "$output" = "v2.0.0" ]
+}
+
+# --- MEDIUM (Tess) ----------------------------------------------------------
+
+@test "check_prereqs fails when the install directory is not writable and sudo is unavailable" {
+  local install_dir="${WORK_DIR}/install"
+  mkdir -p "$install_dir"
+  chmod 555 "$install_dir"
+
+  # A PATH with curl present (so the download-path branch passes) but no
+  # sudo, isolating this test to the write-permission branch specifically.
+  local minimal_path_dir="${WORK_DIR}/minimal-path-nosudo"
+  mkdir -p "$minimal_path_dir"
+  ln -s "$(command -v bash)" "${minimal_path_dir}/bash"
+  ln -s "$(command -v curl)" "${minimal_path_dir}/curl"
+
+  run env PATH="$minimal_path_dir" bash -c "source '$SCRIPT'; check_prereqs '${install_dir}'"
+  chmod 755 "$install_dir"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"sudo"* ]]
+}
+
+@test "atomic_install invokes sudo only when the install directory is not directly writable" {
+  make_fixture_set "$WORK_DIR" v9.9.9
+  local install_dir="${WORK_DIR}/install"
+  mkdir -p "$install_dir"
+  chmod 555 "$install_dir"
+
+  # A passthrough fake sudo that records it was called, then execs the real
+  # command. It cannot truly elevate (this test has no root), so the
+  # underlying operation may still fail on the real 555 permission; the
+  # point of this test is only to prove atomic_install's sudo_cmd branch is
+  # taken when install_dir is not writable, not to prove real elevation
+  # (that needs a live host, out of scope for a unit test).
+  local fake_bin="${WORK_DIR}/fakebin-sudo"
+  mkdir -p "$fake_bin"
+  local marker="${WORK_DIR}/sudo-called"
+  cat > "${fake_bin}/sudo" <<EOF
+#!/usr/bin/env bash
+echo called >> "${marker}"
+exec "\$@"
+EOF
+  chmod +x "${fake_bin}/sudo"
+
+  run env PATH="${fake_bin}:${PATH}" bash -c "source '$SCRIPT'; atomic_install '${WORK_DIR}' '${install_dir}' v9.9.9 openbrain-web"
+  chmod 755 "$install_dir"
+
+  [ -f "$marker" ]
+}
+
+@test "atomic_install fails closed with a distinct message when the final rename fails, and leaves the prior binary in place" {
+  make_fixture_set "$WORK_DIR" v9.9.9
+  local install_dir="${WORK_DIR}/install"
+  mkdir -p "$install_dir"
+  echo "OLD-openbrain-web" > "${install_dir}/openbrain-web"
+  chmod 755 "${install_dir}/openbrain-web"
+
+  local fake_bin="${WORK_DIR}/fakebin-mv"
+  mkdir -p "$fake_bin"
+  cat > "${fake_bin}/mv" <<'EOF'
+#!/usr/bin/env bash
+echo "mv: simulated failure" >&2
+exit 1
+EOF
+  chmod +x "${fake_bin}/mv"
+
+  run env PATH="${fake_bin}:${PATH}" bash -c "source '$SCRIPT'; atomic_install '${WORK_DIR}' '${install_dir}' v9.9.9 openbrain-web"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"finalize"* ]]
+
+  # The prior binary is untouched: the rename never happened.
+  run cat "${install_dir}/openbrain-web"
+  [ "$output" = "OLD-openbrain-web" ]
+
+  # The staged temp copy is intentionally left in place for inspection,
+  # distinct from the mktemp/cp/chmod failure paths, which clean it up.
+  run bash -c "ls -A '${install_dir}'"
+  [[ "$output" == *".openbrain-web."* ]]
 }

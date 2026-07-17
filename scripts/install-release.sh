@@ -159,6 +159,20 @@ download_via_curl() {
   local token="${GH_TOKEN:-${GITHUB_TOKEN:-}}"
   local asset url
 
+  # When a token is present, write the Authorization header to a 0600 temp
+  # file and pass it to curl as `-H @file` rather than `-H "Authorization:
+  # token ..."` on the command line: argv (and therefore the token) is
+  # visible to other local users via `ps`, a bearer token must not be. The
+  # RETURN trap cleans the header file up on every exit path of this
+  # function, not just the happy one.
+  local header_file=""
+  if [[ -n "$token" ]]; then
+    header_file="$(mktemp)"
+    chmod 600 "$header_file"
+    printf 'Authorization: token %s\n' "$token" > "$header_file"
+  fi
+  trap '[[ -n "$header_file" ]] && rm -f "$header_file"' RETURN
+
   for asset in "${assets[@]}"; do
     url="https://github.com/${repo}/releases/download/${version}/${asset}"
     if curl -fsSL -o "${scratch_dir}/${asset}" "$url"; then
@@ -168,13 +182,13 @@ download_via_curl() {
     if [[ -n "$token" ]] && command -v jq >/dev/null 2>&1; then
       local asset_id
       asset_id="$(curl -fsSL \
-        -H "Authorization: token ${token}" \
+        -H "@${header_file}" \
         -H "Accept: application/vnd.github+json" \
         "https://api.github.com/repos/${repo}/releases/tags/${version}" \
         | jq -r --arg name "$asset" '.assets[] | select(.name == $name) | .id' 2>/dev/null || true)"
       if [[ -n "$asset_id" && "$asset_id" != "null" ]]; then
         if curl -fsSL \
-          -H "Authorization: token ${token}" \
+          -H "@${header_file}" \
           -H "Accept: application/octet-stream" \
           -o "${scratch_dir}/${asset}" \
           "https://api.github.com/repos/${repo}/releases/assets/${asset_id}"; then
@@ -261,7 +275,17 @@ verify_checksums() {
       return 1
     fi
 
-    actual="$(sha256sum "$asset_path" | awk '{print $1}')"
+    # Guarded explicitly (not left to the surrounding `set -e`): this
+    # function is invoked as `verify_checksums ... || exit 1` in main, and
+    # bash suspends errexit for the entire duration of a function called as
+    # the left operand of `||`. An unguarded sha256sum failure here would
+    # otherwise leave $actual empty and fall through to the mismatch branch
+    # below, misreporting a read failure as a checksum mismatch.
+    if ! actual="$(sha256sum "$asset_path" | awk '{print $1}')" || [[ -z "$actual" ]]; then
+      log_error checksum "failed to compute a checksum for ${asset}; unable to verify"
+      return 1
+    fi
+
     if [[ "$actual" != "$expected" ]]; then
       log_error checksum "checksum mismatch for ${asset}: expected ${expected}, got ${actual}"
       return 1
@@ -284,7 +308,17 @@ verify_versions() {
   for binary in "${binaries[@]}"; do
     asset="$(asset_filename "$binary" "$expected_version")"
     asset_path="${scratch_dir}/${asset}"
-    chmod +x "$asset_path"
+
+    # Guarded explicitly: this function runs under `verify_versions ... ||
+    # exit 1` in main, which suspends errexit for its whole body (see the
+    # matching comment in verify_checksums). An unguarded chmod failure here
+    # would otherwise fall through to the --version invocation below, which
+    # fails for a different reason (permission denied) and reports a
+    # confusing "failed to execute" rather than naming the real cause.
+    if ! chmod +x "$asset_path"; then
+      log_error version "failed to set the exec bit on ${binary} before running --version"
+      return 1
+    fi
 
     if ! got="$("$asset_path" --version 2>&1)"; then
       log_error version "failed to execute ${binary} --version"
@@ -301,6 +335,20 @@ verify_versions() {
   return 0
 }
 
+# report_partial_install prints, on any atomic_install failure, which
+# binaries were already renamed into place at the new version (indices
+# 0..failed_index-1 of binaries) and which remain at their prior version
+# (failed_index..end, including the one that just failed: its rename never
+# happened). Pure operator-triage output, not a control-flow signal.
+report_partial_install() {
+  local expected_version="$1" failed_index="$2"
+  shift 2
+  local -a binaries=("$@")
+  local -a updated=("${binaries[@]:0:${failed_index}}")
+  local -a prior=("${binaries[@]:${failed_index}}")
+  log_info "partial install at ${expected_version}: updated -> ${updated[*]:-<none>}; left at prior version -> ${prior[*]:-<none>}"
+}
+
 # atomic_install installs each binary by creating a temp file on the SAME
 # filesystem as install_dir, copying the verified bytes into it, setting mode
 # 0755, and renaming it into place. A partially-written or non-executable
@@ -311,6 +359,16 @@ verify_versions() {
 # copy, chmod, rename), and only when install_dir is not already writable by
 # the invoking user. Every earlier stage (download, checksum verify, version
 # verify) has already completed unprivileged.
+#
+# Every command below is explicitly guarded with its own `if ! ...; then
+# return 1; fi` rather than relying on the script's top-level `set -e`: this
+# function is invoked as `atomic_install ... || exit 1` in main, and bash
+# suspends errexit for a function's entire body when the function call is
+# the left operand of `||` (or the condition of if/while). Without an
+# explicit guard, `chmod 0755 "$tmp"` failing silently would still let the
+# loop reach `mv -f`, which succeeds, installing a non-executable binary and
+# returning 0 as if nothing were wrong: the failure would only surface later,
+# when systemd tries and fails to exec it.
 #
 # Note on partial-failure scope: because every binary was already checksum-
 # and version-verified before this function runs, a failure partway through
@@ -328,26 +386,35 @@ atomic_install() {
     sudo_cmd=(sudo)
   fi
 
-  local binary asset src tmp
-  for binary in "${binaries[@]}"; do
+  local i binary asset src tmp
+  for i in "${!binaries[@]}"; do
+    binary="${binaries[$i]}"
     asset="$(asset_filename "$binary" "$expected_version")"
     src="${scratch_dir}/${asset}"
 
     if ! tmp="$("${sudo_cmd[@]}" mktemp "${install_dir}/.${binary}.XXXXXX")"; then
       log_error install "failed to create a temp file in ${install_dir} for ${binary}"
+      report_partial_install "$expected_version" "$i" "${binaries[@]}"
       return 1
     fi
 
     if ! "${sudo_cmd[@]}" cp "$src" "$tmp"; then
       log_error install "failed to stage ${binary} into ${tmp}"
-      "${sudo_cmd[@]}" rm -f "$tmp"
+      "${sudo_cmd[@]}" rm -f "$tmp" || true
+      report_partial_install "$expected_version" "$i" "${binaries[@]}"
       return 1
     fi
 
-    "${sudo_cmd[@]}" chmod 0755 "$tmp"
+    if ! "${sudo_cmd[@]}" chmod 0755 "$tmp"; then
+      log_error install "failed to set mode 0755 on staged ${binary} (${tmp}); aborting before install so a non-executable binary is never renamed into place"
+      "${sudo_cmd[@]}" rm -f "$tmp" || true
+      report_partial_install "$expected_version" "$i" "${binaries[@]}"
+      return 1
+    fi
 
     if ! "${sudo_cmd[@]}" mv -f "$tmp" "${install_dir}/${binary}"; then
       log_error install "failed to finalize ${binary} (staged copy left at ${tmp} for inspection)"
+      report_partial_install "$expected_version" "$i" "${binaries[@]}"
       return 1
     fi
   done
@@ -372,18 +439,25 @@ main() {
   local scratch_dir
   scratch_dir="$(mktemp -d)"
   # shellcheck disable=SC2064
+  # Double-quoted (early) expansion is intentional here: it bakes the exact
+  # scratch_dir path into the trap command at registration time, so cleanup
+  # still targets the right directory even if a later edit introduces a
+  # nested scope where the variable might not be visible when EXIT fires.
+  # scratch_dir is never reassigned in this function, so deferred (single-
+  # quoted) expansion would resolve to the same value; early expansion is
+  # simply the more defensive choice.
   trap "rm -rf '$scratch_dir'" EXIT
 
-  local -a assets=()
+  local -a binary_assets=()
   local b
   for b in "${binaries[@]}"; do
-    assets+=("$(asset_filename "$b" "$version")")
+    binary_assets+=("$(asset_filename "$b" "$version")")
   done
-  assets+=("$SUMS_FILE_NAME")
+  local -a assets=("${binary_assets[@]}" "$SUMS_FILE_NAME")
 
   download_release "$repo" "$version" "$scratch_dir" "${assets[@]}" || exit 1
 
-  verify_checksums "$scratch_dir" "$SUMS_FILE_NAME" "${assets[@]:0:${#binaries[@]}}" || exit 1
+  verify_checksums "$scratch_dir" "$SUMS_FILE_NAME" "${binary_assets[@]}" || exit 1
 
   verify_versions "$scratch_dir" "$version" "${binaries[@]}" || exit 1
 
