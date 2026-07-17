@@ -19,7 +19,6 @@ package version
 import (
 	"fmt"
 	"io"
-	"log/slog"
 )
 
 // Version is the canonical openbrain release version.
@@ -29,23 +28,32 @@ var Version = "dev"
 
 // HandleFlag reports whether args names the --version flag (checked as the
 // flag form only, in first position, matching cmd/openbrain's original
-// convention) and, when it does, writes Version to w before returning true.
+// convention) and, when it does, writes Version to w.
 //
 // Every openbrain binary (openbrain, openbrain-mcp, openbrain-web,
 // openbrain-watchd, openbrain-telegram, openbrain-slack) calls this as the
 // FIRST thing in main(), before any config load, DB connection, or other
 // startup work: a version check must boot with zero dependencies so the
 // Phase 2 installer can query any managed binary on a fresh host with no
-// environment configured. Callers exit/return 0 when this reports true.
-func HandleFlag(args []string, w io.Writer) bool {
+// environment configured.
+//
+// The two return values are independent signals: handled reports whether
+// args named the flag at all (false means "not our concern, keep going
+// through normal startup"); err is non-nil only when handled is true AND the
+// write to w failed. Callers MUST check err whenever handled is true and
+// exit non-zero on a non-nil err, rather than returning 0 unconditionally.
+// Without that check, a broken stdout pipe (a full disk, a closed pipe, a
+// installer that closed its read end early) would make a version query
+// FAIL silently: the flag was recognized, nothing was ever written, yet the
+// process would still exit 0, indistinguishable from a successful print to
+// any caller that only checks the exit code (the Phase 2 installer chief
+// among them).
+func HandleFlag(args []string, w io.Writer) (handled bool, err error) {
 	if len(args) == 0 || args[0] != "--version" {
-		return false
+		return false, nil
 	}
-	// The write itself is checked (not ignored) so a broken stdout pipe is a
-	// visible signal, not silent noise; there is nothing more to do about it
-	// here; the flag was still recognized, so the caller still exits 0.
-	if _, err := fmt.Fprintln(w, Version); err != nil {
-		slog.Error("writing version output failed", "error", err)
+	if _, writeErr := fmt.Fprintln(w, Version); writeErr != nil {
+		return true, fmt.Errorf("writing version: %w", writeErr)
 	}
-	return true
+	return true, nil
 }

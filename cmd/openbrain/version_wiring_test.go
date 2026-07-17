@@ -12,11 +12,11 @@ import (
 // binary (via TestMain's helper-process intercept) with a single
 // "--version" argument and a FULLY bare environment (no PATH, no HOME, no
 // OPENBRAIN_DB_PASSWORD, nothing but the helper-process sentinel), proving
-// main() delegates to version.HandleFlag before any config load, DB
-// connection, or other startup work. version.TestHandleFlag in
-// internal/version owns the flag-detection and output-format behavior; this
-// test owns only the wiring: that THIS binary's main() actually calls it
-// first.
+// main() reports the version and exits 0 before any config load or DB
+// connection: the same zero-dependency contract as the other five
+// binaries, even though this one checks the flag inline (its positional
+// subcommand arg layout does not fit version.HandleFlag's args[0]-only
+// contract) rather than delegating to the shared helper.
 //
 // This test runs main() in a CHILD process, so Go's coverage instrumentation
 // does not credit this package's coverage percentage for main()'s body (a

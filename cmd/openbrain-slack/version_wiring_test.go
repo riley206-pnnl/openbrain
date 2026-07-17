@@ -17,6 +17,16 @@ import (
 // internal/version owns the flag-detection and output-format behavior; this
 // test owns only the wiring: that THIS binary's main() actually calls it
 // first.
+//
+// This test runs main() in a CHILD process, so Go's coverage instrumentation
+// does not credit this package's coverage percentage for main()'s body (a
+// known limitation: coverage only counts code executed in-process). CI does
+// not gate cmd/ package coverage: .github/workflows/test.yml runs plain
+// `go test -race -count=1 ./...` with no -coverprofile and no threshold, and
+// the Makefile's own test-cover/ci targets scope coverage to ./internal/...
+// only, deliberately excluding ./cmd/... The behavior itself IS exercised
+// end to end by this subprocess; the metric drop is a tooling artifact, not
+// a coverage gap.
 func TestVersionFlagWiring(t *testing.T) {
 	t.Parallel()
 
